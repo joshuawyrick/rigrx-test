@@ -41,6 +41,8 @@ The sign-in hero uses an original CSS composition, not the photographic mockup. 
 
 ## Validation
 
+Verified on commit 7941baf4a7c6dd9d63900ec1dba4320dfd6e36cb: all 6 platform/syntax tests and 65 Chromium/WebKit screen/viewport cases passed. [Run and screenshots](https://github.com/joshuawyrick/rigrx-test/actions/runs/34862528693).
+
 Redesign checks workflow runs Node platform/syntax tests and Chromium/WebKit UI checks against the fixture showroom.
 Screenshots are attached to the workflow as **rigrx-design-screenshots**.
 The browser suite covers 320, 390, 820 and 1440 px layouts and checks horizontal overflow, role navigation,

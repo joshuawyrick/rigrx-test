@@ -37,7 +37,7 @@ window.RIGRX_PLATFORM=Object.freeze({
       MAKES:{heavy:['Peterbilt','Freightliner']},MODELS:{Peterbilt:['389','579']},TRAILER_TYPES:['Tanker — crude','Dry van']};
     if(path==='/me')return previewMe();
     if(path==='/requests/mine')return [previewRequest,{...previewRequest,id:9,status:'completed',service_key:'tires',service_label:'Tires'},{...previewRequest,id:8,status:'cancelled'}];
-    if(path.startsWith('/requests/preview'))return {count:4};
+    if(path.startsWith('/requests/preview'))return {matches:4,without_filters:4};
     if(path==='/requests/12')return {request:previewRequest,responders:previewResponders,on_the_way:null};
     if(path==='/messages/threads')return [previewThread,{...previewThread,provider_id:22,other_name:'Kern Heavy Towing',last_body:'Estimated arrival: 50 minutes.'}];
     if(path.startsWith('/messages/12/'))return {request:previewRequest,other_name:'Valley Recovery',others:{responders:2,quoted:2},messages:[
