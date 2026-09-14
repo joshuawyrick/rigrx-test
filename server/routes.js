@@ -3,10 +3,10 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
-const { q, one } = require('./db');
+const { q, one, transaction } = require('./db');
 const auth = require('./auth');
 const { chargeLead, refund, SIMULATED, cardSetup, saveCard } = require('./payments');
-const { sms, wsPush } = require('./notify');
+const { sms, wsPush, wsRevoke, wsCompany } = require('./notify');
 const { matchProviders, notifyProviders, alertRecipients, haversineMiles, distanceBand } = require('./match');
 const { areaLabel, searchCities } = require('./geo');
 const { getCatalog, getTrades, ensurePricing, slugify } = require('./catalog');
@@ -36,27 +36,11 @@ for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
       : h));
 }
 
+require('./fleet').install(router);
+
 /* ---------------- uploads (photos, COI docs) ---------------- */
-const storage = multer.diskStorage({
-  destination: path.join(__dirname, '..', 'uploads'),
-  filename: (req, file, cb) => cb(null, crypto.randomBytes(8).toString('hex') + path.extname(file.originalname).slice(0, 8))
-});
-// Only photos and PDFs. Without this, any signed-in user could upload an .html
-// file and have it served from this domain — a hosted phishing page with our name
-// on it. Breakdown photos and insurance documents are all this endpoint is for.
-const OK_UPLOADS = /^(image\/(jpeg|png|webp|gif|heic|heif)|application\/pdf)$/i;
-const OK_EXT = /\.(jpe?g|png|webp|gif|heic|heif|pdf)$/i;
-const upload = multer({
-  storage,
-  limits: { fileSize: 8 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (OK_UPLOADS.test(file.mimetype) && OK_EXT.test(file.originalname)) return cb(null, true);
-    cb(Object.assign(new Error('Only photos (JPG, PNG, WebP, HEIC) and PDFs can be uploaded'), { status: 400 }));
-  }
-});
-router.post('/upload', auth.requireAuth, upload.single('file'), (req, res) => {
-  res.json({ url: '/uploads/' + req.file.filename });
-});
+const files=require('./files');
+router.post('/upload',auth.requireAuth,files.upload,files.save);
 
 /* ---------------- service catalog ---------------- */
 // Everyone reads the catalog; only the admin writes it.
@@ -145,7 +129,8 @@ router.put('/admin/trades/:id', auth.requireRole('admin'), async (req, res) => {
     [b.label ?? null, b.icon ?? null, b.blurb ?? null,
      typeof b.active === 'boolean' ? b.active : null,
      b.presets ? JSON.stringify(b.presets) : null, req.params.id]);
-  res.json(t || {});
+  if(!t)return res.status(403).json({error:'Only the owner or fleet office can edit this vehicle'});
+  res.json(t);
 });
 
 // How many companies would actually get this request? Lets the driver see the
@@ -244,7 +229,7 @@ router.post('/auth/verify', async (req, res) => {
   const lang = req.body.lang === 'es' ? 'es' : 'en';
   if (user.lang !== lang) user = await one('UPDATE users SET lang=$1 WHERE id=$2 RETURNING *', [lang, user.id]);
   const token = await auth.createSession(user.id);
-  res.cookie('rigrx_session', token, { httpOnly: true, sameSite: 'lax', maxAge: 30 * 24 * 3600 * 1000 });
+  res.cookie('rigrx_session', token, { httpOnly: true, sameSite: 'lax', secure: require('./config').live, maxAge: 30 * 24 * 3600 * 1000 });
   res.json({ user: publicUser(user) });
 });
 
@@ -256,7 +241,7 @@ router.put('/me/lang', auth.requireAuth, async (req, res) => {
 
 router.post('/auth/logout', async (req, res) => {
   const token = req.cookies?.rigrx_session;
-  if (token) await q('DELETE FROM sessions WHERE token=$1', [token]);
+  if (token) { await q('DELETE FROM sessions WHERE token=$1', [token]); wsRevoke(null,token); }
   res.clearCookie('rigrx_session');
   res.json({ ok: true });
 });
@@ -264,7 +249,7 @@ router.post('/auth/logout', async (req, res) => {
 function publicUser(u) {
   return { id: u.id, phone: u.phone, role: u.role, name: u.name, email: u.email,
            driver_type: u.driver_type, company: u.company, lang: u.lang || '',
-           company_id: u.company_id || null,
+           company_id: u.company_id || null, fleet_id:u.fleet_id, fleet_role:u.fleet_role,
            member_role: u.member_role || (u.role === 'provider' ? 'owner' : ''),
            assignable: !!u.assignable,
            prefer_licensed_only: !!u.prefer_licensed_only,
@@ -273,18 +258,21 @@ function publicUser(u) {
 
 router.get('/me', async (req, res) => {
   if (!req.user) return res.json({ user: null });
-  const out = { user: publicUser(req.user), simulatedPayments: SIMULATED() };
+  const out = { user: publicUser(req.user), simulatedPayments: SIMULATED(), mode:require('./config').mode };
   if (req.user.role === 'provider' || req.user.role === 'admin') {
     const cid = companyIdOf(req.user);
     out.provider = await one('SELECT * FROM providers WHERE user_id=$1', [cid]);
     if (out.provider) {
       out.provider.locations = await q('SELECT * FROM provider_locations WHERE user_id=$1 ORDER BY id', [cid]);
       out.provider.custom = await q('SELECT * FROM custom_services WHERE user_id=$1 ORDER BY id', [cid]);
+      delete out.provider.stripe_customer; delete out.provider.stripe_pm;
+      if(req.user.member_role && req.user.member_role!=='owner'){delete out.provider.verification;delete out.provider.admin_notes;}
+      if(req.user.member_role==='tech'){delete out.provider.lead_credits;delete out.provider.card_last4;}
     }
   }
   if (req.user.role === 'driver' || req.user.role === 'admin') {
-    out.trucks = await q('SELECT * FROM trucks WHERE user_id=$1 ORDER BY id', [req.user.id]);
-    out.trailers = await q('SELECT * FROM trailers WHERE user_id=$1 ORDER BY id', [req.user.id]);
+    out.trucks = await q('SELECT * FROM trucks WHERE user_id=$1 OR (fleet_id=$2 AND (assigned_driver=$1 OR $3::boolean)) ORDER BY id', [req.user.id,req.user.fleet_id,require('./fleet').office(req.user)]);
+    out.trailers = await q('SELECT * FROM trailers WHERE user_id=$1 OR (fleet_id=$2 AND (assigned_driver=$1 OR $3::boolean)) ORDER BY id', [req.user.id,req.user.fleet_id,require('./fleet').office(req.user)]);
   }
   res.json(out);
 });
@@ -299,35 +287,42 @@ router.put('/driver/profile', auth.requireAuth, async (req, res) => {
 });
 
 router.post('/trucks', auth.requireAuth, async (req, res) => {
-  const t = await one('INSERT INTO trucks (user_id, data) VALUES ($1,$2) RETURNING *', [req.user.id, req.body.data || {}]);
+  const t = await one('INSERT INTO trucks (user_id, data, fleet_id) VALUES ($1,$2,$3) RETURNING *', [req.user.id, req.body.data || {},require('./fleet').office(req.user)?req.user.fleet_id:null]);
   res.json(t);
 });
 router.put('/trucks/:id', auth.requireAuth, async (req, res) => {
-  const t = await one('UPDATE trucks SET data=$1 WHERE id=$2 AND user_id=$3 RETURNING *',
-    [req.body.data || {}, req.params.id, req.user.id]);
-  res.json(t || {});
+  const t = await one('UPDATE trucks SET data=$1 WHERE id=$2 AND ((fleet_id IS NULL AND user_id=$3) OR (fleet_id=$4 AND $5::boolean)) RETURNING *',
+    [req.body.data || {}, req.params.id, req.user.id,req.user.fleet_id,require('./fleet').office(req.user)]);
+  if(!t)return res.status(403).json({error:'Only the owner or fleet office can edit this vehicle'});
+  res.json(t);
 });
 router.delete('/trucks/:id', auth.requireAuth, async (req, res) => {
-  await q('DELETE FROM trucks WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+  await q('DELETE FROM trucks WHERE id=$1 AND ((fleet_id IS NULL AND user_id=$2) OR (fleet_id=$3 AND $4::boolean))', [req.params.id, req.user.id,req.user.fleet_id,require('./fleet').office(req.user)]);
   res.json({ ok: true });
 });
 router.post('/trailers', auth.requireAuth, async (req, res) => {
-  const t = await one('INSERT INTO trailers (user_id, data) VALUES ($1,$2) RETURNING *', [req.user.id, req.body.data || {}]);
+  const t = await one('INSERT INTO trailers (user_id, data, fleet_id) VALUES ($1,$2,$3) RETURNING *', [req.user.id, req.body.data || {},require('./fleet').office(req.user)?req.user.fleet_id:null]);
   res.json(t);
 });
 router.put('/trailers/:id', auth.requireAuth, async (req, res) => {
-  const t = await one('UPDATE trailers SET data=$1 WHERE id=$2 AND user_id=$3 RETURNING *',
-    [req.body.data || {}, req.params.id, req.user.id]);
-  res.json(t || {});
+  const t = await one('UPDATE trailers SET data=$1 WHERE id=$2 AND ((fleet_id IS NULL AND user_id=$3) OR (fleet_id=$4 AND $5::boolean)) RETURNING *',
+    [req.body.data || {}, req.params.id, req.user.id,req.user.fleet_id,require('./fleet').office(req.user)]);
+  if(!t)return res.status(403).json({error:'Only the owner or fleet office can edit this vehicle'});
+  res.json(t);
 });
 router.delete('/trailers/:id', auth.requireAuth, async (req, res) => {
-  await q('DELETE FROM trailers WHERE id=$1 AND user_id=$2', [req.params.id, req.user.id]);
+  await q('DELETE FROM trailers WHERE id=$1 AND ((fleet_id IS NULL AND user_id=$2) OR (fleet_id=$3 AND $4::boolean))', [req.params.id, req.user.id,req.user.fleet_id,require('./fleet').office(req.user)]);
   res.json({ ok: true });
 });
 
 /* ---------------- provider profile ---------------- */
 router.put('/provider/profile', requireOwner, async (req, res) => {
   const { name, dispatch_phone, after_phone, email, hours, services, equipment, verification, capabilities, primary_trade, duty_classes } = req.body;
+  if(verification){
+    const old=await providerOf(req);
+    const urls=['coi_file','w9_file'].filter(k=>verification[k]&&verification[k]!==old?.verification?.[k]).map(k=>verification[k]);
+    if(!await files.owned(req.user,urls))return res.status(403).json({error:'Upload your own verification documents'});
+  }
   await q('INSERT INTO providers (user_id) VALUES ($1) ON CONFLICT DO NOTHING', [companyIdOf(req.user)]);
   const p = await one(`
     UPDATE providers SET
@@ -402,20 +397,25 @@ router.get('/providers/:id/public', async (req, res) => {
 });
 
 /* ---------------- requests (driver side) ---------------- */
-router.post('/requests', auth.requireAuth, async (req, res) => {
+router.post('/requests', auth.requireRole('driver'), async (req, res) => {
   const b = req.body;
   const price = await one('SELECT * FROM pricing WHERE service_key=$1', [b.service_key]);
   if (!price) return res.status(400).json({ error: 'Unknown service type' });
-  if (typeof b.lat !== 'number' || typeof b.lng !== 'number')
+  if (!Number.isFinite(b.lat) || !Number.isFinite(b.lng) || Math.abs(b.lat)>90 || Math.abs(b.lng)>180)
     return res.status(400).json({ error: 'Location required' });
 
+  if(!await files.owned(req.user,b.photos||[]))return res.status(403).json({error:'Upload your own request photos'});
+  const clientKey=typeof b.client_key==='string'?b.client_key.slice(0,100):null;
+  const result=await transaction(async tx=>{
+  await tx.q('SELECT id FROM users WHERE id=$1 FOR UPDATE',[req.user.id]);
+  if(clientKey){const prior=await tx.one('SELECT * FROM requests WHERE driver_id=$1 AND client_key=$2',[req.user.id,clientKey]);if(prior)return {request:prior,replayed:true};}
   // rate limit: max 3 open requests per driver
-  const openCount = await one(`SELECT COUNT(*)::int AS n FROM requests WHERE driver_id=$1 AND status='open'`, [req.user.id]);
-  if (openCount.n >= 3) return res.status(429).json({ error: 'You already have 3 open requests' });
+  const openCount = await tx.one(`SELECT COUNT(*)::int AS n FROM requests WHERE driver_id=$1 AND status='open'`, [req.user.id]);
+  if (openCount.n >= 3) throw Object.assign(new Error('You already have 3 open requests'),{status:429});
 
   let truck = {}, trailer = {};
-  if (b.truck_id) truck = (await one('SELECT data FROM trucks WHERE id=$1 AND user_id=$2', [b.truck_id, req.user.id]))?.data || {};
-  if (b.trailer_id) trailer = (await one('SELECT data FROM trailers WHERE id=$1 AND user_id=$2', [b.trailer_id, req.user.id]))?.data || {};
+  if(b.truck_id){const asset=await require('./fleet').equipment(req.user,'trucks',b.truck_id);if(!asset)throw Object.assign(new Error('Choose a truck assigned to you'),{status:403});truck=asset.data;}
+  if(b.trailer_id){const asset=await require('./fleet').equipment(req.user,'trailers',b.trailer_id);if(!asset)throw Object.assign(new Error('Choose a trailer assigned to you'),{status:403});trailer=asset.data;}
 
   const licensedOnly = !!b.licensed_only;
   // Tire requests carry the exact failed position; the size is derived from the saved rig
@@ -432,10 +432,10 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
       wheel: isTrailer ? '' : (truck.wheels || '')
     };
   }
-  const request = await one(`
+  const request = await tx.one(`
     INSERT INTO requests (driver_id, service_key, service_label, lat, lng, area_label, landmark,
-                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item, trade_filter, duty_class, direction)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
+                          situation, can_move, description, photos, truck, trailer, licensed_only, tire_position, service_item, trade_filter, duty_class, direction, fleet_id, client_key)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,
     [req.user.id, b.service_key, price.label, b.lat, b.lng,
      areaLabel(b.lat, b.lng) || b.area_label || 'Location shared by driver', b.landmark || '',
      JSON.stringify(b.situation || []), b.can_move || 'no', b.description || '',
@@ -445,9 +445,14 @@ router.post('/requests', auth.requireAuth, async (req, res) => {
      // trust the saved rig over whatever the client sent, falling back to heavy
      ['heavy','medium','light'].includes(truck.duty) ? truck.duty
        : (['heavy','medium','light'].includes(b.duty_class) ? b.duty_class : 'heavy'),
-     String(b.direction || '').slice(0, 24)]);
+     String(b.direction || '').slice(0, 24),req.user.fleet_id,clientKey]);
   // remember the driver's preference for next time
-  await q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
+  await tx.q('UPDATE users SET prefer_licensed_only=$1 WHERE id=$2', [licensedOnly, req.user.id]);
+
+  return {request};
+  });
+  const request=result.request;
+  if(result.replayed)return res.json({request,notified:request.notified_count||0,replayed:true});
 
   // match & notify (auto-expand radius if nothing within providers' stated radii)
   let matches = await matchProviders(request);
@@ -467,7 +472,8 @@ router.get('/requests/mine', auth.requireAuth, async (req, res) => {
 });
 
 router.get('/requests/:id', auth.requireAuth, async (req, res) => {
-  const r = await one('SELECT * FROM requests WHERE id=$1 AND driver_id=$2', [req.params.id, req.user.id]);
+  const owner=await require('./fleet').requestOwner(req.user,req.params.id);
+  const r=owner?await one('SELECT * FROM requests WHERE id=$1',[req.params.id]):null;
   if (!r) return res.status(404).json({ error: 'Not found' });
   const responders = await q(`
     SELECT pu.provider_id, pu.slot, pu.premium, pu.created_at,
@@ -499,26 +505,28 @@ router.get('/requests/:id', auth.requireAuth, async (req, res) => {
 });
 
 router.post('/requests/:id/select', auth.requireAuth, async (req, res) => {
-  const r = await one(`UPDATE requests SET status='selected', selected_provider=$1, selected_at=NOW()
-    WHERE id=$2 AND driver_id=$3 AND status='open' RETURNING *`,
-    [req.body.provider_id, req.params.id, req.user.id]);
-  if (!r) return res.status(400).json({ error: 'Request not open' });
+  const providerId = Number(req.body.provider_id);
+  if (!Number.isSafeInteger(providerId) || providerId < 1)
+    return res.status(400).json({ error: 'Choose a responding company' });
+  const r = await one(require('./selection').SELECT_PROVIDER,
+    [providerId, req.params.id, await require('./fleet').requestOwner(req.user,req.params.id)]);
+  if (!r) return res.status(409).json({ error: 'Request is no longer open or this company is no longer eligible. Refresh the responses.' });
   const buyers = await q(`SELECT pu.provider_id, u.phone FROM purchases pu JOIN users u ON u.id=pu.provider_id WHERE pu.request_id=$1`, [r.id]);
   for (const b of buyers) {
-    if (b.provider_id === req.body.provider_id) {
+    if (b.provider_id === providerId) {
       await sms(b.provider_id, b.phone, `RIGRX: You got the job! Request #${r.id} (${r.service_label}). The driver chose you.`);
-      wsPush(b.provider_id, 'selected', { request_id: r.id, won: true });
+      await wsCompany(b.provider_id, 'selected', { request_id: r.id, won: true });
     } else {
-      wsPush(b.provider_id, 'selected', { request_id: r.id, won: false });
+      await wsCompany(b.provider_id, 'selected', { request_id: r.id, won: false });
     }
   }
   res.json({ ok: true });
 });
 
 router.post('/requests/:id/complete', auth.requireAuth, async (req, res) => {
-  const r = await one(`UPDATE requests SET status='completed'
+  const r = await one(`UPDATE requests SET status='completed',completed_at=COALESCE(completed_at,NOW())
     WHERE id=$1 AND (driver_id=$2 OR selected_provider=$2) AND status='selected' RETURNING *`,
-    [req.params.id, req.user.id]);
+    [req.params.id, (await require('./fleet').requestOwner(req.user,req.params.id)) || (req.user.role==='provider'?companyIdOf(req.user):null)]);
   if (!r) return res.status(400).json({ error: 'Nothing to complete' });
   if (r.selected_provider)
     await q('UPDATE providers SET jobs_won = jobs_won + 1 WHERE user_id=$1', [r.selected_provider]);
@@ -531,7 +539,7 @@ router.post('/requests/:id/open-to-all', auth.requireAuth, async (req, res) => {
   const r = await one(`UPDATE requests SET licensed_only=FALSE, trade_filter='[]'
     WHERE id=$1 AND driver_id=$2 AND status='open'
       AND (licensed_only=TRUE OR jsonb_array_length(trade_filter) > 0) RETURNING *`,
-    [req.params.id, req.user.id]);
+    [req.params.id, (await require('./fleet').requestOwner(req.user,req.params.id)) || (req.user.role==='provider'?companyIdOf(req.user):null)]);
   if (!r) return res.status(400).json({ error: 'Nothing to widen' });
   const price = await one('SELECT * FROM pricing WHERE service_key=$1', [r.service_key]);
   const already = (await q('SELECT provider_id FROM purchases WHERE request_id=$1', [r.id])).map(x => x.provider_id);
@@ -545,7 +553,7 @@ router.post('/requests/:id/open-to-all', auth.requireAuth, async (req, res) => {
 
 router.post('/requests/:id/cancel', auth.requireAuth, async (req, res) => {
   const r = await one(`UPDATE requests SET status='cancelled'
-    WHERE id=$1 AND driver_id=$2 AND status='open' RETURNING *`, [req.params.id, req.user.id]);
+    WHERE id=$1 AND driver_id=$2 AND status='open' RETURNING *`, [req.params.id, (await require('./fleet').requestOwner(req.user,req.params.id)) || (req.user.role==='provider'?companyIdOf(req.user):null)]);
   if (!r) return res.status(400).json({ error: 'Request not open' });
   res.json({ ok: true });
 });
@@ -641,7 +649,8 @@ router.get('/leads', requireDispatch, async (req, res) => {
       const d = haversineMiles(r.lat, r.lng, l.lat, l.lng);
       if (d <= l.radius_mi && (best === null || d < best)) best = d;
     }
-    if (best === null) continue;
+    if (!(await require('./commerce').eligible(p,r))) continue;
+    if(best===null)best=Math.min(...locations.map(l=>haversineMiles(r.lat,r.lng,l.lat,l.lng)));
     const slots = await slotInfo(r.id);
     if (slots.soldOut) continue;
     const mine = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, companyIdOf(req.user)]);
@@ -676,6 +685,7 @@ router.get('/leads/:id', requireDispatch, async (req, res) => {
   if (!r) return res.status(404).json({ error: 'Not found' });
   const slots = await slotInfo(r.id);
   const mine = await one('SELECT * FROM purchases WHERE request_id=$1 AND provider_id=$2 AND refunded=FALSE', [r.id, companyIdOf(req.user)]);
+  if(!mine && !await require('./commerce').eligible(p,r))return res.status(403).json({error:'This lead is outside your approved services or coverage'});
   const driver = await one('SELECT * FROM users WHERE id=$1', [r.driver_id]);
   const base = {
     id: r.id, service_key: r.service_key, service_label: r.service_label,
@@ -722,75 +732,12 @@ router.get('/leads/:id', requireDispatch, async (req, res) => {
   res.json(base);
 });
 
-router.post('/leads/:id/buy', requireDispatch, async (req, res) => {
-  const p = await providerOf(req);
-  if (!p) return res.status(400).json({ error: 'Complete your company profile first' });
-  if (!p.approved) return res.status(403).json({ error: 'Your account is pending RIGRX approval' });
-
-  const r = await one(`SELECT r.*, pr.standard_cents, pr.premium_cents FROM requests r
-    JOIN pricing pr ON pr.service_key=r.service_key WHERE r.id=$1 AND r.status='open'`, [req.params.id]);
-  if (!r) return res.status(400).json({ error: 'Lead is no longer open' });
-  if (r.licensed_only && !p.license_verified)
-    return res.status(403).json({ error: 'This driver requested licensed companies only' });
-  const tf = Array.isArray(r.trade_filter) ? r.trade_filter : [];
-  if (tf.length && !tf.includes(p.primary_trade))
-    return res.status(403).json({ error: 'This driver asked for a different kind of company' });
-  const dc = Array.isArray(p.duty_classes) ? p.duty_classes : ['heavy','medium','light'];
-  if (!dc.includes(r.duty_class || 'heavy'))
-    return res.status(403).json({ error: 'You have not marked that you service this size of truck' });
-
-  const existing = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2', [r.id, companyIdOf(req.user)]);
-  if (existing) return res.status(400).json({ error: 'You already own this lead' });
-
-  const slots = await slotInfo(r.id);
-  if (slots.soldOut) return res.status(400).json({ error: 'Lead sold out (4 responders max)' });
-  const premium = slots.premiumOpen;
-  const amount = premium ? r.premium_cents : r.standard_cents;
-
-  // Free credits spend first — that's the "first leads free" offer working. The
-  // decrement is atomic, so two dispatchers buying at once can't spend one credit
-  // twice. Only when the balance is zero does a card come into it.
-  let paidWith = 'card', paymentId = '', charged = amount;
-  const spent = await one(
-    `UPDATE providers SET lead_credits = lead_credits - 1
-     WHERE user_id=$1 AND lead_credits > 0 RETURNING lead_credits`, [companyIdOf(req.user)]);
-  if (spent) {
-    paidWith = 'credit'; paymentId = 'credit'; charged = 0;
-    await q(`INSERT INTO credit_log (provider_id, delta, reason) VALUES ($1,-1,$2)`,
-      [companyIdOf(req.user), `Spent on lead #${r.id}`]);
-  } else {
-    if (!SIMULATED() && !p.stripe_pm)
-      return res.status(402).json({ error: 'No card on file. Add one in Settings → Billing to keep buying leads.' });
-    const charge = await chargeLead(p, amount, `RIGRX lead #${r.id} — ${r.service_label}${premium ? ' (premium slot)' : ''}`);
-    if (!charge.ok) return res.status(402).json({ error: 'Your card was declined — update it in Settings → Billing and try again. This lead is still open.' });
-    paymentId = charge.paymentId;
-  }
-
-  const slot = slots.total + 1;
-  try {
-    await q(`INSERT INTO purchases (request_id, provider_id, slot, amount_cents, premium, stripe_payment, paid_with, list_price_cents)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [r.id, companyIdOf(req.user), slot, charged, premium, paymentId, paidWith, amount]);
-  } catch (e) {
-    // The slot vanished between check and insert. Undo whatever was taken.
-    if (paidWith === 'credit') {
-      await q(`UPDATE providers SET lead_credits = lead_credits + 1 WHERE user_id=$1`, [companyIdOf(req.user)]);
-      await q(`INSERT INTO credit_log (provider_id, delta, reason) VALUES ($1,1,$2)`,
-        [companyIdOf(req.user), `Returned — lead #${r.id} slot was taken`]);
-    } else if (paymentId && paymentId !== 'simulated') await refund(paymentId);
-    return res.status(409).json({ error: 'Slot was just taken — refresh the lead' });
-  }
-
-  // tell the driver instantly
-  const driver = await one('SELECT * FROM users WHERE id=$1', [r.driver_id]);
-  wsPush(driver.id, 'responder', { request_id: r.id, provider_id: companyIdOf(req.user), name: p.name, slot });
-  await sms(driver.id, driver.phone, inLang(driver,
-    `RIGRX: ${p.name} unlocked your ${r.service_label} request and can now contact you. Open the app to chat.`,
-    `RIGRX: ${p.name} respondió a su solicitud de ${r.service_label} y ya puede contactarlo. Abra la app para chatear.`));
-
-  res.json({ ok: true, slot, premium, amount_cents: charged, paid_with: paidWith,
-             credits_left: spent ? spent.lead_credits : undefined,
-             simulated: paymentId === 'simulated' });
+router.post('/leads/:id/buy',requireDispatch,async(req,res)=>{
+ const purchase=await require('./commerce').buy(Number(req.params.id),companyIdOf(req.user));
+ const r=await one('SELECT driver_id FROM requests WHERE id=$1',[req.params.id]);
+ const p=await providerOf(req);
+ wsPush(r.driver_id,'responder',{request_id:Number(req.params.id),provider_id:companyIdOf(req.user),name:p.name,slot:purchase.slot});
+ res.json({...purchase,ok:true,simulated:purchase.stripe_payment==='simulated'});
 });
 
 router.get('/myleads', requireDispatch, async (req, res) => {
@@ -856,7 +803,7 @@ const JOB_COLS = `r.id, r.service_label, r.service_key, r.area_label, r.landmark
 async function jobFor(req, id, { techOnly = false } = {}) {
   const r = await one(`SELECT * FROM requests WHERE id=$1 AND selected_provider=$2`,
     [id, companyIdOf(req.user)]);
-  if (!r) return null;
+  if (!r || r.status!=='selected') return null;
   if (techOnly && r.assigned_tech !== req.user.id) return null;
   return r;
 }
@@ -994,7 +941,7 @@ router.get('/tech/jobs', auth.requireRole('provider'), async (req, res) => {
   const rows = await q(`
     SELECT ${JOB_COLS}, u.name AS driver_name, u.phone AS driver_phone
     FROM requests r JOIN users u ON u.id = r.driver_id
-    WHERE r.assigned_tech = $1
+    WHERE r.assigned_tech = $1 AND r.status IN ('selected','completed')
     ORDER BY (r.completed_at IS NOT NULL), r.id DESC LIMIT 30`, [req.user.id]);
   res.json(rows);
 });
@@ -1048,6 +995,8 @@ router.post('/provider/members', requireOwner, async (req, res) => {
   if (role === 'owner') return res.status(400).json({ error: 'There can only be one owner' });
 
   const existing = await one('SELECT * FROM users WHERE phone=$1', [phone]);
+  if(existing?.role==='admin')return res.status(409).json({error:'That number is already an administrator'});
+  if(existing?.role==='provider' && !existing.company_id && await one('SELECT user_id FROM providers WHERE user_id=$1',[existing.id]))return res.status(409).json({error:'That number owns a service company'});
   if (existing && existing.company_id && existing.company_id !== cid)
     return res.status(409).json({ error: 'That number already belongs to another company' });
   if (existing && existing.role === 'driver' && !existing.company_id)
@@ -1149,8 +1098,8 @@ async function canAccessThread(user, requestId, providerId) {
   const r = await one('SELECT * FROM requests WHERE id=$1', [requestId]);
   if (!r) return null;
   if (user.role === 'admin') return r;
-  if (r.driver_id === user.id) return r;                       // the driver
-  if (user.id === Number(providerId)) {                        // the provider — must have bought
+  if (r.driver_id === user.id || (require('./fleet').office(user) && r.fleet_id===user.fleet_id)) return r;                       // the driver
+  if (user.role==='provider' && companyIdOf(user) === Number(providerId) && (user.member_role!=='tech' || r.assigned_tech===user.id)) {                        // the provider — must have bought
     const pu = await one('SELECT id FROM purchases WHERE request_id=$1 AND provider_id=$2 AND refunded=FALSE', [requestId, providerId]);
     if (pu) return r;
   }
@@ -1164,13 +1113,13 @@ router.get('/messages/threads', auth.requireAuth, async (req, res) => {
       SELECT r.id AS request_id, pu.provider_id, r.service_label, r.status, u.name AS other_name,
         (SELECT body FROM messages m WHERE m.request_id=r.id AND m.provider_id=pu.provider_id ORDER BY m.id DESC LIMIT 1) AS last_body
       FROM purchases pu JOIN requests r ON r.id=pu.request_id JOIN users u ON u.id=r.driver_id
-      WHERE pu.provider_id=$1 AND pu.refunded=FALSE ORDER BY pu.id DESC LIMIT 30`, [req.user.id]);
+      WHERE pu.provider_id=$1 AND pu.refunded=FALSE AND ($2::boolean OR r.assigned_tech=$3) ORDER BY pu.id DESC LIMIT 30`, [companyIdOf(req.user),req.user.member_role!=='tech',req.user.id]);
   } else {
     rows = await q(`
       SELECT r.id AS request_id, pu.provider_id, r.service_label, r.status, p.name AS other_name,
         (SELECT body FROM messages m WHERE m.request_id=r.id AND m.provider_id=pu.provider_id ORDER BY m.id DESC LIMIT 1) AS last_body
       FROM requests r JOIN purchases pu ON pu.request_id=r.id JOIN providers p ON p.user_id=pu.provider_id
-      WHERE r.driver_id=$1 AND pu.refunded=FALSE ORDER BY pu.id DESC LIMIT 30`, [req.user.id]);
+      WHERE (r.driver_id=$1 OR (r.fleet_id=$2 AND $3::boolean)) AND pu.refunded=FALSE ORDER BY pu.id DESC LIMIT 30`, [req.user.id,req.user.fleet_id,require('./fleet').office(req.user)]);
   }
   res.json(rows);
 });
@@ -1214,6 +1163,7 @@ router.post('/messages/:requestId/:providerId', auth.requireAuth, async (req, re
   if (!r) return res.status(403).json({ error: 'No access to this thread' });
   const body = String(req.body.body || '').slice(0, 2000);
   const quote = req.body.quote || null; // {amount_cents, eta, note}
+  if(quote && (req.user.role!=='provider' || req.user.member_role==='tech' || !Number.isSafeInteger(quote.amount_cents) || quote.amount_cents<0 || quote.amount_cents>100000000))return res.status(400).json({error:'Only office staff can send a valid quote'});
   if (!body && !quote) return res.status(400).json({ error: 'Empty message' });
   const m = await one(
     `INSERT INTO messages (request_id, provider_id, sender_id, body, quote) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -1223,7 +1173,7 @@ router.post('/messages/:requestId/:providerId', auth.requireAuth, async (req, re
   // review queue, never a gate. Only matters while the job is still up for grabs;
   // once a company is chosen they're entitled to the location anyway.
   if (r.status === 'open' && body) {
-    const senderRole = req.user.id === r.driver_id ? 'driver' : 'provider';
+    const senderRole = req.user.role==='provider'?'provider':'driver';
     const hit = guard.inspect(body, senderRole);
     if (hit) {
       await q(`INSERT INTO chat_flags
@@ -1235,8 +1185,8 @@ router.post('/messages/:requestId/:providerId', auth.requireAuth, async (req, re
   }
 
   // push to the other party
-  const recipient = req.user.id === r.driver_id ? Number(req.params.providerId) : r.driver_id;
-  wsPush(recipient, 'message', m);
+  const recipient = req.user.role==='provider' ? r.driver_id : Number(req.params.providerId);
+  if(recipient===r.driver_id)wsPush(recipient,'message',m);else {await wsCompany(recipient,'message',m);if(r.assigned_tech)wsPush(r.assigned_tech,'message',m);}
   res.json(m);
 });
 
@@ -1396,21 +1346,29 @@ router.get('/admin/purchases', auth.requireRole('admin'), async (req, res) => {
     ${win} ORDER BY pu.id DESC LIMIT 100`);
   res.json(rows.map(x => ({ ...x, won: x.selected_provider === x.provider_id })));
 });
-router.post('/admin/purchases/:id/refund', auth.requireRole('admin'), async (req, res) => {
-  const pu = await one('SELECT * FROM purchases WHERE id=$1', [req.params.id]);
-  if (!pu) return res.status(404).json({ error: 'Not found' });
-  if (pu.refunded) return res.status(400).json({ error: 'Already refunded' });
-  if (pu.paid_with === 'credit') {
-    // Bought with a free credit: the refund is the credit coming back.
-    await q('UPDATE providers SET lead_credits = lead_credits + 1 WHERE user_id=$1', [pu.provider_id]);
-    await q(`INSERT INTO credit_log (provider_id, delta, reason, by_admin) VALUES ($1,1,$2,TRUE)`,
-      [pu.provider_id, `Refund of lead #${pu.request_id}`]);
-  } else {
-    const r = await refund(pu.stripe_payment);
-    if (!r.ok) return res.status(400).json({ error: r.error });
-  }
-  await q('UPDATE purchases SET refunded=TRUE WHERE id=$1', [req.params.id]);
-  res.json({ ok: true });
+router.post('/admin/purchases/:id/refund',auth.requireRole('admin'),async(req,res)=>{
+ res.json(await require('./commerce').refundPurchase(Number(req.params.id)));
+});
+router.get('/admin/payment-orders',auth.requireRole('admin'),async(req,res)=>{
+ res.json(await q("SELECT o.*,p.name FROM payment_orders o JOIN providers p ON p.user_id=o.provider_id WHERE o.status='pending' ORDER BY o.created_at"));
+});
+
+router.get('/admin/system',auth.requireRole('admin'),async(req,res)=>{
+ const config=require('./config');
+ const failed=await one("SELECT COUNT(*)::int AS n FROM notification_queue WHERE status='failed'");
+ const queued=await one("SELECT COUNT(*)::int AS n FROM notification_queue WHERE status='pending'");
+ res.json({Mode:config.mode,Database:process.env.DATABASE_URL?'PostgreSQL':'Local demo database',SMS:config.smsMode,Payments:config.paymentMode,Storage:config.storageMode,'Queued notifications':queued.n,'Failed notifications':failed.n});
+});
+router.post('/admin/payment-orders/:id/reconcile',auth.requireRole('admin'),async(req,res)=>{
+ const order=await one('SELECT * FROM payment_orders WHERE id=$1',[req.params.id]);
+ if(!order)return res.sendStatus(404);
+ if(order.status!=='pending')return res.json({message:'Already resolved'});
+ const stripe=require('./payments').stripe;
+ if(!stripe)return res.json({message:'Simulated mode: retry the same lead purchase to finish it'});
+ const results=await stripe.paymentIntents.search({query:"metadata['rigrx_order']:'"+order.id+"'",limit:10});
+ const paid=results.data.find(p=>p.status==='succeeded'&&p.amount===order.amount_cents&&p.currency==='usd');
+ if(paid){await require('./commerce').finalize(order.id,paid.id);return res.json({message:'Payment confirmed and lead unlocked'});}
+ res.json({message:'No successful payment found yet. The reservation remains held; check Stripe before making changes.'});
 });
 
 /* ---- admin settings ---- */

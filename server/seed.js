@@ -1,6 +1,7 @@
 // ============ Seed script: demo data so the app isn't empty on first run ============
 // Run once with:  npm run seed
 require('dotenv').config();
+if(require('./config').live)throw new Error('Do not seed demo accounts into a live database');
 const { q, one, migrate, pool } = require('./db');
 
 async function main() {
