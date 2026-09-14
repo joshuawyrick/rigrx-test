@@ -1,3 +1,7 @@
+# Historical audit — superseded by the complete test build
+
+The findings below describe the earlier app. The current fixes, configuration and remaining launch requirements are documented in [START-HERE.md](../START-HERE.md).
+
 # Current app audit and next steps
 
 The uploaded `rigrx-main (1).zip` matches the application code originally copied to the test repository. The industrial/mobile redesign branch builds on that code. The ZIP also supplied setup files omitted during the manual upload; `.gitattributes` and a clarified `.env.example` are restored here. There is no original gear-logo asset in the ZIP.

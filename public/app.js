@@ -93,6 +93,7 @@ function homeFor(){
     if (S.me.member_role === 'tech') return 't-jobs';
     return (!S.provider || !S.provider.name) ? 'p-setup1' : 'p-feed';
   }
+  if(['owner','dispatcher'].includes(S.me.fleet_role))return 'fleet';
   return !S.me.name ? 'd-setup1' : 'd-home';
 }
 
@@ -100,6 +101,7 @@ function homeFor(){
 const liveConnection = RIGRX_PLATFORM.liveConnection(ev => {
     let msg; try { msg = JSON.parse(ev.data); } catch(e){ return; }
     const { event, data } = msg;
+    if(['job_status','job_assigned','job_bounced'].includes(event) && ['d-active','p-jobs','t-jobs','fleet'].includes(S.view)){toast(T('Job updated'));render();}
     if (event === 'new_lead'){
       toast(`New ${data.service} lead ${data.band} away — open Live Leads`);
       if (S.view === 'p-feed') render();
@@ -385,7 +387,7 @@ async function saveDSetup2(){
   if (S.editTruck?.id) await api('PUT', '/trucks/' + S.editTruck.id, { data });
   else await api('POST', '/trucks', { data });
   await loadMe();
-  if (wasSetUp) { toast(T('Truck saved')); S.editTruck = null; return nav('d-garage'); }
+  if (wasSetUp) { toast(T('Truck saved')); S.editTruck = null; return nav(['owner','dispatcher'].includes(S.me.fleet_role)?'fleet':'d-garage'); }
   nav('d-setup3');
 }
 function trailerForm(r = {}){
@@ -450,7 +452,7 @@ async function saveDSetup3(){
     else await api('POST', '/trailers', { data });
   }
   await loadMe();
-  if (wasSetUp) { toast(T('Trailer saved')); S.editTrailer = null; return nav('d-garage'); }
+  if (wasSetUp) { toast(T('Trailer saved')); S.editTrailer = null; return nav(['owner','dispatcher'].includes(S.me.fleet_role)?'fleet':'d-garage'); }
   toast(T('Profile complete — your garage is ready'));
   nav('d-home');
 }
@@ -764,6 +766,8 @@ async function previewMatches(){
 async function sendRequest(btn){
   btn.disabled = true;
   const d = readFilters();
+  S.draft.client_key ||= crypto.randomUUID();
+  d.client_key=S.draft.client_key;
   try {
     const res = await api('POST', '/requests', d);
     toast(res.notified === 0
@@ -1055,7 +1059,7 @@ async function chatView(backView){
       <button class="btn ghost" onclick="leaveChat('d-active',{activeRequestId:${r}})">${ic('chevL',14)} ${T('Responders')}</button>
       <button class="btn choose" onclick="askChoose(${r},${p},'${safeName}')">${ic('check',15)} ${T('Choose this company')}</button>
     </div>` : ''}
-    ${!isDriver ? `
+    ${!isDriver && S.me.member_role!=='tech' ? `
     <div class="quotebar">
       <input type="text" id="q-amt" inputmode="decimal" placeholder="$ amount">
       <input type="text" id="q-eta" placeholder="ETA (35 min)">
@@ -1575,7 +1579,7 @@ async function vPLead(){
   ${full ? `
   <button class="btn" onclick="openThread(${l.id}, ${S.me.company_id || S.me.id}, 'p-myleads')">${ic('chat',16)} Message the driver now</button>
   <div style="height:8px"></div>
-  ${l.selected_provider === S.me.id ? '<div class="card alert"><b class="mini k">The driver chose YOU for this job</b></div>' : ''}
+  ${l.selected_provider === (S.me.company_id||S.me.id) ? '<div class="card alert"><b class="mini k">The driver chose YOU for this job</b></div>' : ''}
   ` : `
   <div class="card alert"><div class="mini" style="line-height:1.55">${ic('zap',13)} First 3 buyers get this lead at the standard price. After that, one final <b class="k">premium slot</b> at 2×. Max 4 companies ever see this driver's info.</div></div>
   ${l.my_credits > 0 ? `<div class="card" style="border-color:#1a7f43; background:#183a2c">
@@ -2697,6 +2701,7 @@ async function removeItem(itemId){
 const VIEWS = {
   signin: vSignin, code: vCode,
   'd-setup1': vDSetup1, 'd-setup2': vDSetup2, 'd-setup3': vDSetup3,
+  'fleet':vFleet,'a-system':vSystem,
   'd-home': vDHome, 'd-request': vDRequest, 'd-details': vDDetails, 'd-location': vDLocation,
   'd-review': vDReview, 'd-active': vDActive, 'd-chat': ()=>chatView('d-threads'), 'd-threads': vThreads,
   'd-pubprofile': vDPubProfile, 'd-rate': vDRate, 'd-garage': vDGarage,
@@ -2712,7 +2717,7 @@ const NAVS = {
   driver: [
     {ico:'home', label:'Home', v:'d-home', also:['d-request','d-details','d-location','d-review','d-active','d-pubprofile','d-rate']},
     {ico:'chat', label:'Messages', v:'d-threads', also:['d-chat']},
-    {ico:'truck', label:'Garage', v:'d-garage'}],
+    {ico:'truck', label:'Garage', v:'d-garage'},{ico:'folder',label:'Fleet office',v:'fleet'}],
   provider: [
     {ico:'zap', label:'Live Leads', v:'p-feed', also:['p-lead']},
     {ico:'wrench', label:'Jobs', v:'p-jobs'},
@@ -2733,7 +2738,7 @@ const NAVS = {
     {ico:'card', label:'Sales', v:'a-purchases'},
     {ico:'plus', label:'Requested', v:'a-custom'},
     {ico:'zap', label:'Requests', v:'a-requests', also:['a-request']},
-    {ico:'warn', label:'Chat flags', v:'a-flags'}]
+    {ico:'warn', label:'Chat flags', v:'a-flags'},{ico:'sliders',label:'System',v:'a-system'}]
 };
 let renderSeq = 0;
 async function render(){
@@ -2788,6 +2793,7 @@ async function render(){
 
 /* ---------------- boot ---------------- */
 (async function boot(){
+  try{const config=await RIGRX_PLATFORM.request('GET','/config');if(config.mode&&config.mode!=='live'){const banner=document.createElement('div');banner.id='mode-banner';banner.textContent=config.mode.toUpperCase()+' MODE · Test data only · SMS: '+config.sms+' · Payments: '+config.payments;const link=document.createElement('a');link.href='/demo-guide.html';link.textContent=' · Demo accounts & walkthrough';link.style.color='inherit';banner.append(link);document.body.prepend(banner);}}catch(e){}
   await loadCatalog();
   try { await loadMe(); } catch(e){}
   if (S.me) connectWS();

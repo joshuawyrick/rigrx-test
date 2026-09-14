@@ -2,7 +2,7 @@
 // Without STRIPE_SECRET_KEY, purchases run in SIMULATION MODE: they succeed instantly
 // and are marked 'simulated' — the full app flow works before you connect Stripe.
 let stripe = null;
-if (process.env.STRIPE_SECRET_KEY) {
+if (require('./config').paymentMode === 'stripe') {
   try { stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); }
   catch (e) { console.error('Stripe init failed, running in simulation mode:', e.message); }
 }
@@ -10,7 +10,7 @@ if (process.env.STRIPE_SECRET_KEY) {
 const SIMULATED = () => !stripe;
 
 // Charge a provider's saved card for a lead. Returns { ok, paymentId }.
-async function chargeLead(provider, amountCents, description) {
+async function chargeLead(provider, amountCents, description, orderId) {
   if (!stripe) return { ok: true, paymentId: 'simulated' };
   try {
     // Real mode: charge the customer's default payment method off-session.
@@ -18,6 +18,7 @@ async function chargeLead(provider, amountCents, description) {
       return { ok: false, error: 'No card on file — add one in Settings' };
     const intent = await stripe.paymentIntents.create({
       amount: amountCents,
+      metadata: {rigrx_order: orderId},
       currency: 'usd',
       customer: provider.stripe_customer,
       payment_method: provider.stripe_pm,
@@ -25,18 +26,18 @@ async function chargeLead(provider, amountCents, description) {
       confirm: true,
       off_session: true,
       automatic_payment_methods: { enabled: true, allow_redirects: 'never' }
-    });
+    }, {idempotencyKey:'rigrx-order-'+orderId});
     return { ok: intent.status === 'succeeded', paymentId: intent.id };
   } catch (e) {
     console.error('Stripe charge failed:', e.message);
-    return { ok: false, error: e.message };
+    return { ok: false, error: 'Payment could not be completed', uncertain: !['StripeCardError','StripeInvalidRequestError'].includes(e.type) };
   }
 }
 
-async function refund(paymentId) {
+async function refund(paymentId, key) {
   if (!stripe || paymentId === 'simulated') return { ok: true };
   try {
-    await stripe.refunds.create({ payment_intent: paymentId });
+    await stripe.refunds.create({ payment_intent: paymentId }, {idempotencyKey:'rigrx-refund-'+key});
     return { ok: true };
   } catch (e) { return { ok: false, error: e.message }; }
 }
@@ -76,4 +77,4 @@ async function saveCard(customerId, paymentMethodId) {
   return { last4: pm.card?.last4 || '', brand: pm.card?.brand || '' };
 }
 
-module.exports = { chargeLead, refund, SIMULATED, cardSetup, saveCard };
+module.exports = { stripe, chargeLead, refund, SIMULATED, cardSetup, saveCard };

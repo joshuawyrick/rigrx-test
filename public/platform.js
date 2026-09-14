@@ -30,9 +30,9 @@
         try{current=web.connect();}catch(error){retry();return;}
         socket=current;
         current.onmessage=event=>{if(socket===current && running)onmessage(event);};
-        current.onclose=()=>{
+        current.onclose=event=>{
           if(socket!==current)return;
-          socket=null;retry();
+          socket=null;if(event?.code===4001){running=false;return;}retry();
         };
       }
       return {

@@ -397,3 +397,37 @@ CREATE TABLE IF NOT EXISTS driver_ratings (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (request_id, provider_id)
 );
+
+-- Release 2: private files, transactional commerce, fleet workspace.
+ALTER TABLE otp_codes ALTER COLUMN code TYPE TEXT;
+CREATE TABLE IF NOT EXISTS file_uploads (
+ filename TEXT PRIMARY KEY, owner_id INTEGER NOT NULL REFERENCES users(id),
+ mime TEXT NOT NULL, backend TEXT NOT NULL DEFAULT 'local', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS payment_orders (
+ id UUID PRIMARY KEY, request_id INTEGER NOT NULL REFERENCES requests(id), provider_id INTEGER NOT NULL REFERENCES providers(user_id),
+ slot INTEGER NOT NULL, premium BOOLEAN NOT NULL, amount_cents INTEGER NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending', payment_id TEXT, error TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ UNIQUE(request_id,provider_id)
+);
+CREATE TABLE IF NOT EXISTS stripe_events(id TEXT PRIMARY KEY, processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS fleet_organizations(id SERIAL PRIMARY KEY,name TEXT NOT NULL,owner_id INTEGER UNIQUE NOT NULL REFERENCES users(id));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS fleet_id INTEGER REFERENCES fleet_organizations(id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS fleet_role TEXT;
+ALTER TABLE trucks ADD COLUMN IF NOT EXISTS fleet_id INTEGER REFERENCES fleet_organizations(id);
+ALTER TABLE trailers ADD COLUMN IF NOT EXISTS fleet_id INTEGER REFERENCES fleet_organizations(id);
+ALTER TABLE trucks ADD COLUMN IF NOT EXISTS assigned_driver INTEGER REFERENCES users(id);
+ALTER TABLE trailers ADD COLUMN IF NOT EXISTS assigned_driver INTEGER REFERENCES users(id);
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS fleet_id INTEGER REFERENCES fleet_organizations(id);
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS client_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS request_client_key ON requests(driver_id,client_key) WHERE client_key IS NOT NULL;
+CREATE TABLE IF NOT EXISTS fleet_invitations (
+ id SERIAL PRIMARY KEY,fleet_id INTEGER NOT NULL REFERENCES fleet_organizations(id),phone TEXT NOT NULL,
+ role TEXT NOT NULL CHECK(role IN ('driver','dispatcher')),created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ UNIQUE(fleet_id,phone)
+);
+CREATE TABLE IF NOT EXISTS notification_queue (
+ id BIGSERIAL PRIMARY KEY,user_id INTEGER REFERENCES users(id),phone TEXT NOT NULL,body TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),last_error TEXT
+);

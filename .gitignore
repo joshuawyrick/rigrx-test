@@ -7,3 +7,7 @@ test-results/
 playwright-report/
 dist/
 .DS_Store
+
+.demo-data/
+.release-test-data/
+release/

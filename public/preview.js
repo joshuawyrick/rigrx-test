@@ -28,6 +28,7 @@ window.RIGRX_PLATFORM=Object.freeze({
   leadLink:window.RIGRX_PLATFORM.leadLink,
   liveConnection(){return {start(){},stop(){}};},
   async request(method,path,body){
+    if(path==='/config')return {};
     if(path==='/auth/request-code')return {devCode:'123456'};
     if(path==='/auth/verify'){previewRole=body.role==='provider'?'provider':'driver';return {};}
     if(path==='/auth/logout'){previewRole='signed-out';return {};}

@@ -277,3 +277,8 @@ textarea {resize:vertical;min-height:100px;line-height:1.5}
 @media(prefers-reduced-motion:reduce) {
  *,*:before,*:after {animation:none!important;transition:none!important;scroll-behavior:auto!important}
 }
+/* Fleet office and integration workspace */
+.fleet-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.fleet-metrics strong{display:block;font-size:38px;margin-top:10px;color:var(--text,#fff)}
+.fleet-asset,.fleet-person{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 0;border-bottom:1px solid #303840}.fleet-asset>div{flex:1}.fleet-asset label{min-width:180px}.fleet-asset .btn,.fleet-person .btn{width:auto;flex-shrink:0}.fleet-person button{min-height:44px}
+#mode-banner{padding:9px 16px;text-align:center;background:#593e13;color:#ffe3ac;font-size:13px;border-bottom:1px solid #936c2b}body:has(#mode-banner:not([hidden])) .sidebar{top:37px}
+@media(max-width:700px){.fleet-metrics{grid-template-columns:repeat(2,1fr)}.fleet-asset{flex-wrap:wrap}.fleet-asset>div{flex-basis:100%}.fleet-asset label{flex:1;min-width:0}.fleet-person{gap:10px}.fleet-person span{overflow-wrap:anywhere}}
