@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "RigRx — Roadside Services",
+  "short_name": "RigRx",
+  "description": "Truck roadside service, requests and messages.",
+  "lang": "en",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#101215",
+  "theme_color": "#101215",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

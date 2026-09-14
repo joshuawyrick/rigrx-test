@@ -1,5 +1,7 @@
 # RIGRX
 
+> **Industrial redesign branch:** See [redesign guide](docs/REDESIGN.md) and [mobile roadmap](docs/MOBILE-ROADMAP.md). For an isolated sample-data tour, open `/design-preview.html` after starting the app. Native store builds are not included yet.
+
 **Emergency roadside service marketplace for trucks.** Drivers request help in seconds; qualified service companies nearby get text alerts, buy the lead (3 standard slots + 1 premium slot, max 4), unlock the driver's location and info, and chat instantly to win the job.
 
 Built with Node.js + Express + PostgreSQL + WebSockets. No build step — deploys anywhere Node runs.

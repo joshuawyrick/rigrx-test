@@ -16,17 +16,12 @@ function timeAgo(ts){
   const h = Math.round(m / 60);
   return h < 24 ? T('{n} hr ago', { n: h }) : T('{n} d ago', { n: Math.round(h / 24) });
 }
-async function api(method, url, body){
-  const res = await fetch('/api' + url, {
-    method, headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const data = await res.json().catch(()=>({}));
-  if (!res.ok) { toast(data.error || T('Request failed')); throw new Error(data.error || res.status); }
-  return data;
+async function api(method,url,body){
+  try{return await RIGRX_PLATFORM.request(method,url,body);}
+  catch(error){toast(error.message||T('Request failed'));throw error;}
 }
-function tog(el){ el.classList.toggle('sel'); }
-function togOne(el){ [...el.parentElement.children].forEach(c=>c.classList.remove('sel')); el.classList.add('sel'); }
+function tog(el){ el.classList.toggle('sel'); enhanceUI(); }
+function togOne(el){ [...el.parentElement.children].forEach(c=>c.classList.remove('sel')); el.classList.add('sel'); enhanceUI(); }
 function selOf(groupId){ const g = $(groupId); return g ? [...g.querySelectorAll('.chip.sel')].map(chipVal) : []; }
 // A translated chip shows Spanish but stores English, so the data the providers
 // and the matching engine see never depends on the driver's language.
@@ -71,12 +66,26 @@ async function loadMe(){
   S.simulatedPayments = !!d.simulatedPayments;
 }
 function nav(view, extra){
-  S.view = view;
-  Object.assign(S, extra || {});
-  render();
-  window.scrollTo(0, 0);
-  if (view === 'd-review') setTimeout(previewMatches, 60);
+  S.view=view; Object.assign(S,extra||{});
+  if(view!=='more') S.lastWorkspaceView=view;
+  // Only route identifiers go into browser history. Never store messages, phone
+  // numbers, session tokens, payment details, or equipment profiles here.
+  const route={rigrx:true,view,activeRequestId:S.activeRequestId,leadId:S.leadId,chatKey:S.chatKey,
+    viewProviderId:S.viewProviderId,rateRequestId:S.rateRequestId};
+  if(!history.state?.rigrx || AUTH_LAYOUT.has(view)) history.replaceState(route,'');
+  else if(history.state.view!==view || JSON.stringify(history.state.chatKey)!==JSON.stringify(route.chatKey)) history.pushState(route,'');
+  S.focusHeading=true;
+  render(); window.scrollTo(0,0);
+  if(view==='d-review')setTimeout(previewMatches,60);
 }
+window.addEventListener('popstate',event=>{
+  const route=event.state;
+  if(!route?.rigrx)return;
+  if(!S.me || AUTH_LAYOUT.has(route.view)){ nav(homeFor()); return; }
+  if(['d-details','d-location','d-review'].includes(route.view)&&!S.draft){nav('d-home');return;}
+  Object.assign(S,route); S.focusHeading=true; render();
+  if(route.view==='d-review')setTimeout(previewMatches,60);
+});
 function homeFor(){
   if (!S.me) return 'signin';
   if (S.me.role === 'admin') return 'a-home';
@@ -91,8 +100,7 @@ function homeFor(){
 let ws = null;
 function connectWS(){
   if (ws) try { ws.close(); } catch(e){}
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = RIGRX_PLATFORM.connect();
   ws.onmessage = ev => {
     let msg; try { msg = JSON.parse(ev.data); } catch(e){ return; }
     const { event, data } = msg;
@@ -119,33 +127,34 @@ function connectWS(){
 /* ---------------- auth views ---------------- */
 function authShell(inner, wide){
   return `<div class="authwrap"><div class="authcard${wide?' wide':''}">
-    <div class="logo-lg">RIG<span>RX</span></div>
+    <div class="logo-lg">${brandMark()}</div>
     <div class="tagline">${T('Emergency roadside help for trucks — fast.')}</div>
     ${inner}</div></div>`;
 }
 function vSignin(){
-  return authShell(`
-  <div class="card" style="padding:20px">
-    <span class="sec">${T('Sign in or create an account')}</span>
-    <label class="f">${T('Mobile number')}</label>
-    <input type="tel" id="si-phone" placeholder="(661) 555-0198" autocomplete="tel"
-      inputmode="tel" enterkeyhint="go" onkeydown="if(event.key==='Enter')sendCode()">
-    <label class="f">${T('I am a…')}</label>
-    <div class="chips" id="si-role">
-      <span class="chip sel" data-en="Truck driver" onclick="togOne(this)">${T('Truck driver')}</span>
-      <span class="chip" data-en="Service company" onclick="togOne(this)">${T('Service company')}</span>
-    </div>
-    <div style="height:14px"></div>
-    <button class="btn" onclick="requestCode()">${ic('mobile',16)} ${T('Text me a code')}</button>
-  </div>
-  <div class="faint" style="text-align:center; line-height:1.6">${T('Your number is your account — no passwords.')}<br>${T('New numbers create an account; existing ones sign in.')}</div>
-  ${langToggle()}`);
+  return '<div class="signin-layout"><section class="signin-story" aria-label="RIGRX">'+brandMark()+
+    '<div><div class="eyebrow">'+T('ROADSIDE / REPAIR / RECOVERY')+'</div><h1>'+T('Built for the road.')+
+    '<br><span>'+T('Ready for the unexpected.')+'</span></h1><p>'+T('Your rig. Your road. Your next move. Connect with the service companies that keep you moving.')+'</p></div>'+
+    '<div class="story-services"><span>'+ic('truck',18)+' '+T('Towing')+'</span><span>'+ic('wrench',18)+' '+T('Repair')+'</span><span>'+ic('pin',18)+' '+T('Recovery')+'</span></div></section>'+
+    '<section class="signin-form"><div class="mobile-brand">'+brandMark()+'</div><div class="eyebrow">'+T('WELCOME TO RIGRX')+'</div>'+
+    '<h2>'+T('Get back on the road.')+'</h2><p class="scrsub">'+T('Enter your mobile number and we’ll text you a code to sign in.')+'</p>'+
+    '<div class="card"><label class="f" for="si-phone">'+T('Mobile number')+'</label>'+
+    '<input type="tel" id="si-phone" placeholder="(661) 555-0198" autocomplete="tel" inputmode="tel" enterkeyhint="go" onkeydown="if(event.key===\'Enter\')requestCode()">'+
+    '<label class="f">'+T('I am a…')+'</label><div class="chips" id="si-role">'+
+    '<button type="button" class="chip sel" data-en="Truck driver" onclick="togOne(this)">'+ic('truck',22)+T('Truck driver')+'</button>'+
+    '<button type="button" class="chip" data-en="Service company" onclick="togOne(this)">'+ic('wrench',22)+T('Service company')+'</button></div>'+
+    '<button class="btn" onclick="requestCode()">'+T('Text me a code')+' '+ic('arrowR',18)+'</button></div>'+
+    '<div class="faint" style="text-align:center">'+T('Your number is your account — no passwords.')+'</div>'+langToggle()+
+    '<a class="signin-foot" href="/for-service-companies">'+T('Run a service company? Meet RIGRX.')+'</a></section></div>';
 }
+
 async function requestCode(){
+  if(S.requestingCode)return;
   const phone = qv('si-phone').trim();
   if (!phone) return toast(T('Enter your mobile number'));
   const role = selOf('si-role')[0] === 'Service company' ? 'provider' : 'driver';
-  const d = await api('POST', '/auth/request-code', { phone });
+  S.requestingCode=true;
+  let d; try { d=await api('POST','/auth/request-code',{phone}); } finally {S.requestingCode=false;}
   S.pendingPhone = phone; S.pendingRole = role; S.devCode = d.devCode || null;
   nav('code');
 }
@@ -177,12 +186,14 @@ function onCodeInput(el){
   if (digits.length === 6) { el.blur(); verifyCode(); }
 }
 async function verifyCode(){
+  if(S.verifyingCode)return;
   const code = qv('si-code').trim();
-  if (code.length < 4) return toast(T('Enter the 6-digit code'));
-  await api('POST', '/auth/verify', { phone: S.pendingPhone, code, role: S.pendingRole, lang: getLang() });
-  await loadMe();
-  connectWS();
-  nav(homeFor());
+  if (!/^\d{6}$/.test(code)) return toast(T('Enter the 6-digit code'));
+  S.verifyingCode=true;
+  try {
+    await api('POST', '/auth/verify', { phone: S.pendingPhone, code, role: S.pendingRole, lang: getLang() });
+    await loadMe(); connectWS(); nav(homeFor());
+  } finally {S.verifyingCode=false;}
 }
 async function signOut(){
   await api('POST', '/auth/logout').catch(()=>{});
@@ -441,29 +452,25 @@ async function saveDSetup3(){
 const svcIcon = key => svcIconFor(key);
 
 async function vDHome(){
-  const mine = await api('GET', '/requests/mine');
-  const open = mine.filter(r => ['open','selected'].includes(r.status));
-  const t = S.trucks[0]?.data, r = S.trailers[0]?.data;
-  return `
-  <h2 class="scr lg">${T('Hey')} ${esc((S.me.name || 'driver').split(' ')[0])}</h2>
-  <p class="scrsub">${T('Broke down? Help is minutes away.')}</p>
-  <button class="btn big" onclick="startRequest()">${ic('zap',18)} ${T('REQUEST HELP NOW')}</button>
-  <div style="height:14px"></div>
-  ${open.map(x=>`<div class="card click" onclick="nav('d-active',{activeRequestId:${x.id}})">
-    <div class="row"><span class="mini k">${ic(svcIcon(x.service_key),15)} &nbsp;${T('Request #')}${x.id} — ${esc(T(x.service_label))} · ${TN(x.buyer_count,'{n} responder','{n} responders')}</span>
-    <span class="pill ${x.status==='open'?'red':'dark'}">${T(x.status.toUpperCase())}</span></div></div>`).join('')}
-  <div class="cols2"><div>
-  <div class="card">
-    <div class="row"><span class="sec">${T('My Garage')}</span><span class="faint" style="cursor:pointer" onclick="nav('d-garage')">${T('Manage ›')}</span></div>
-    ${t ? `<div class="checkrow"><span class="cico on">${ic('truck')}</span><div><b class="mini k">${T('Unit')} ${esc(t.unit)} — ${esc(t.year)} ${esc(t.make)} ${esc(t.model)}</b><div class="faint">${esc(t.engine)} · ${esc(t.axles)} · ${esc(t.color)}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('truck')}</span><div class="mini"><a onclick="S.editTruck=null; nav('d-setup2')">${T('Add your truck ›')}</a></div></div>`}
-    ${r ? `<div class="checkrow"><span class="cico on">${ic('trailer')}</span><div><b class="mini k">${T('Trailer')} ${esc(r.num)} — ${esc(r.type)}</b><div class="faint">${r.hazmat ? T('Hazmat: Class')+' '+esc(r.hzClass)+' · UN '+esc(r.un) : T('No hazmat')}</div></div></div>` : `<div class="checkrow"><span class="cico">${ic('trailer')}</span><div class="mini"><a onclick="S.editTrailer=null; nav('d-setup3')">${T('Add your trailer ›')}</a></div></div>`}
-  </div></div><div>
-  <div class="card">
-    <span class="sec">${T('History')}</span>
-    ${mine.filter(x=>['completed','cancelled'].includes(x.status)).slice(0,5).map(x=>`
-      <div class="checkrow"><span class="cico">${ic(svcIcon(x.service_key))}</span><div><b class="mini k">${esc(T(x.service_label))}</b><div class="faint">${timeAgo(x.created_at)} · ${T(x.status)}</div></div></div>`).join('') || `<div class="faint" style="margin-top:8px">${T('No past requests yet')}</div>`}
-  </div></div></div>`;
+  const mine=await api('GET','/requests/mine');
+  const open=mine.filter(r=>['open','selected'].includes(r.status));
+  const recent=mine.filter(r=>['completed','cancelled','expired'].includes(r.status)).slice(0,5);
+  return pageHeading(T('Hey')+' '+(S.me.name||T('Driver')).split(' ')[0],T('Your next move starts here.'))+
+    '<button class="btn big help-hero" onclick="startRequest()">'+ic('wrench',30)+'<span><strong>'+T('REQUEST HELP NOW')+
+    '</strong><small>'+T('Tell us what happened. Compare providers. Choose your help.')+'</small></span>'+ic('arrowR',24)+'</button>'+
+    open.map(r=>'<button class="card active-summary" style="width:100%;text-align:left;color:inherit;font:inherit;cursor:pointer" onclick="nav(\'d-active\',{activeRequestId:'+r.id+'})">'+
+      ic(svcIcon(r.service_key),24)+'<div><strong>'+T('Request #')+r.id+' · '+esc(T(r.service_label))+
+      '</strong><div class="faint">'+TN(r.buyer_count,'{n} responder','{n} responders')+'</div></div>'+statusBadge(r.status)+ic('arrowR',18)+'</button>').join('')+
+    '<div class="dashboard-grid"><section class="card"><div class="section-title"><h3>'+T('Your equipment')+
+    '</h3><button onclick="nav(\'d-garage\')">'+T('Manage')+' '+ic('arrowR',14)+'</button></div>'+
+    (S.trucks[0]?assetSummary('truck',S.trucks[0].data):'<div class="empty-state"><p>'+T('Save your truck details for your next request.')+'</p><button class="btn ghost" onclick="S.editTruck=null;nav(\'d-setup2\')">'+T('+ Add truck')+'</button></div>')+
+    (S.trailers[0]?assetSummary('trailer',S.trailers[0].data):'')+
+    '</section><section class="card"><div class="section-title"><h3>'+T('Recent requests')+'</h3></div>'+
+    (recent.map(r=>'<div class="history-row">'+ic(svcIcon(r.service_key),22)+'<div><strong>'+esc(T(r.service_label))+
+      '</strong><small>'+timeAgo(r.created_at)+'</small></div>'+statusBadge(r.status)+'</div>').join('')||
+      '<div class="empty-state">'+ic('folder',30)+'<h3>'+T('A fresh start.')+'</h3><p>'+T('Your completed and cancelled requests will appear here.')+'</p></div>')+'</section></div>';
 }
+
 function startRequest(){
   S.draft = { situation: ['On highway shoulder',"Can't move"], can_move: 'no', direction: '',
               lat: null, lng: null, photos: [],
@@ -500,13 +507,13 @@ function vDDetails(){
   <p class="scrsub">${T('Step 2 of 4 — the details providers need')}</p>
   <label class="f">${T('Truck')}</label>
   <div class="chips" id="rq-truck">
-    ${t.map((x,i)=>`<span class="chip ${i===0?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${T('Unit')} ${esc(x.data.unit)} · ${esc(x.data.make)} ${esc(x.data.model)}</span>`).join('')}
-    <span class="chip ${t.length?'':'sel'}" data-id="" onclick="togOne(this)">${T('No saved truck')}</span>
+    ${t.map((x,i)=>`<span class="chip ${(d.truck_id !== undefined ? x.id===d.truck_id : i===0)?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${T('Unit')} ${esc(x.data.unit)} · ${esc(x.data.make)} ${esc(x.data.model)}</span>`).join('')}
+    <span class="chip ${d.truck_id===null||!t.length?'sel':''}" data-id="" onclick="togOne(this)">${T('No saved truck')}</span>
   </div>
   <label class="f">${T('Trailer')}</label>
   <div class="chips" id="rq-trailer">
-    ${r.map((x,i)=>`<span class="chip ${i===0?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${esc(x.data.type)} #${esc(x.data.num)}${x.data.hazmat?' ⚠':''}</span>`).join('')}
-    <span class="chip ${r.length?'':'sel'}" data-id="" onclick="togOne(this)">${T('Bobtail / none')}</span>
+    ${r.map((x,i)=>`<span class="chip ${(d.trailer_id !== undefined ? x.id===d.trailer_id : i===0)?'sel':''}" data-id="${x.id}" onclick="togOne(this)">${esc(x.data.type)} #${esc(x.data.num)}${x.data.hazmat?' ⚠':''}</span>`).join('')}
+    <span class="chip ${d.trailer_id===null||!r.length?'sel':''}" data-id="" onclick="togOne(this)">${T('Bobtail / none')}</span>
   </div>
   ${subPicker(d)}
   ${d.service_key === 'tires' ? tirePicker(d) : ''}
@@ -584,9 +591,9 @@ function readTirePicker(){
 }
 async function uploadPhoto(input){
   if (!input.files[0]) return;
-  const fd = new FormData(); fd.append('file', input.files[0]);
-  const res = await fetch('/api/upload', { method: 'POST', body: fd });
-  const data = await res.json();
+  let data;
+  try { data=await RIGRX_PLATFORM.upload(input.files[0]); }
+  catch(error){toast(error.message||T('Request failed'));return;}
   if (data.url){ S.draft.photos.push(data.url); toast(T('Photo added')); render(); }
 }
 function saveDetails(){
@@ -617,11 +624,11 @@ function vDLocation(){
       <a class="faint" onclick="captureGPS()">${T('re-capture')}</a></div>
     <div class="mini listline" style="margin-top:6px">
       <span class="muted">${T('Companies will see')}</span> &nbsp;<b class="k">${esc(d.area_label || T('locating…'))}</b><br>
-      <span class="muted">${T('Exact GPS')}</span> &nbsp;${d.lat.toFixed(4)}, ${d.lng.toFixed(4)} <span class="faint">${T('(only shown after they buy)')}</span>
+      <span class="muted">${T('Exact GPS')}</span> &nbsp;${d.lat.toFixed(4)}, ${d.lng.toFixed(4)} <span class="faint">${T('Your exact location is shared with the provider you choose.')}</span>
     </div>
   </div>` : `
   <div class="card alert">
-    <div class="mini" style="line-height:1.55">${ic('pin',14)} <b class="k">${T('Tap below to share your location.')}</b> ${T('Your exact spot stays hidden until a company pays for the lead — they only see the general area first.')}</div>
+    <div class="mini" style="line-height:1.55">${ic('pin',14)} <b class="k">${T('Tap below to share your location.')}</b> ${T('Your exact location is shared with the provider you choose.')}</div>
     <div style="height:12px"></div>
     <button class="btn" onclick="captureGPS()">${ic('pin',16)} ${T('Use my GPS location')}</button>
   </div>`}
@@ -633,7 +640,7 @@ function vDLocation(){
   <div style="height:4px"></div>
   <label class="f">${T('Landmark or mile marker (optional, helps a lot)')}</label>
   <input type="text" id="rq-landmark" value="${esc(d.landmark || '')}" placeholder="${T('I-5 NB shoulder, mile marker 253, past the Buttonwillow exit')}">
-  <div class="faint" style="margin-top:6px">${T('Only companies that buy your lead see this.')}</div>
+  <div class="faint" style="margin-top:6px">${T('Your exact location is shared with the provider you choose.')}</div>
   <div style="height:16px"></div>
   <button class="btn" onclick="saveLocation()" ${d.lat ? '' : 'disabled'}>${T('Continue')} ${ic('arrowR',15)}</button>
   ${d.lat ? '' : `<div class="faint" style="text-align:center; margin-top:9px">${T('Share your location to continue — or')} <a onclick="manualLocation()">${T('enter it by hand')}</a></div>`}`;
@@ -646,16 +653,14 @@ async function lookupArea(){
   } catch(e){ d.area_label = ''; }
   render();
 }
-function captureGPS(){
-  if (!navigator.geolocation) return toast(T('No GPS on this device — enter it by hand'));
+async function captureGPS(){
   toast(T('Locating…'));
-  navigator.geolocation.getCurrentPosition(
-    pos => {
-      S.draft.lat = pos.coords.latitude; S.draft.lng = pos.coords.longitude;
-      toast(T('Location locked')); lookupArea();
-    },
-    () => toast(T('GPS unavailable — enter it by hand instead')),
-    { enableHighAccuracy: true, timeout: 10000 });
+  try{
+    const pos=await RIGRX_PLATFORM.locate();
+    if(!S.draft)return;
+    S.draft.lat=pos.coords.latitude;S.draft.lng=pos.coords.longitude;
+    toast(T('Location locked'));await lookupArea();
+  }catch(error){toast(T('GPS unavailable — enter it by hand instead'));}
 }
 function manualLocation(){
   const el = document.createElement('div');
@@ -770,7 +775,7 @@ function onTheWayCard(w){
   if (w.arrived) return `
     <div class="card" style="border-color:var(--red); background:var(--red-tint)">
       <div class="row"><b class="mini k" style="font-size:15px">${ic('check',16)} ${esc(w.tech_name || w.company)} ${T('is on scene')}</b></div>
-      <div class="mini" style="margin-top:5px; color:#8c5057">${esc(w.company)}${w.tech_phone ? ' · ' + esc(w.tech_phone) : ''}</div>
+      <div class="mini" style="margin-top:5px; color:#e3adb9">${esc(w.company)}${w.tech_phone ? ' · ' + esc(w.tech_phone) : ''}</div>
     </div>`;
   const setAt = new Date(w.eta_set_at).getTime();
   const left = Math.round((setAt + (w.eta_minutes || 0) * 60000 - Date.now()) / 60000);
@@ -806,13 +811,13 @@ async function vDActive(){
   const filled = d.responders.length;
   return `
   <button class="back" onclick="nav('d-home')">${ic('chevL',15)} ${T('Home')}</button>
-  <h2 class="scr">${r.status==='open' ? T('Help is on the way') : T('Request #')+r.id}</h2>
+  <h2 class="scr">${r.status==='open' ? T(filled ? 'Compare your responses' : 'Waiting for providers') : r.status==='selected' ? T('Provider selected') : T('Request #')+r.id}</h2>
   <p class="scrsub">${T('Request #')}${r.id} · ${esc(T(r.service_label))} · ${timeAgo(r.created_at)} · ${TN(r.notified_count, '{n} company alerted', '{n} companies alerted')}</p>
   ${onTheWayCard(d.on_the_way)}
   <div class="card">
     <div class="row"><span class="sec">${T('Response Slots')}</span><span class="pill red">${filled ? T('{n} of 4 responded', { n: filled }) : T('notifying…')}</span></div>
     <div class="slots">${[0,1,2].map(i=>`<i class="${i<Math.min(filled,3)?'f':''}"></i>`).join('')}<i class="${filled>3?'p':''}" style="${filled>3?'':'opacity:.55'}"></i></div>
-    <div class="faint" style="margin-top:7px">${T('3 standard slots + 1 premium slot · you choose the winner')}</div>
+    <div class="faint" style="margin-top:7px">${T('Compare up to four responses. You choose your provider.')}</div>
   </div>
   ${(r.licensed_only || (r.trade_filter||[]).length) && r.notified_count === 0 && r.status === 'open' ? `
     <div class="card alert">
@@ -972,45 +977,23 @@ async function removeTrailer(id, label){
   await loadMe(); toast(T('Trailer removed')); render();
 }
 async function vDGarage(){
-  return `
-  <h2 class="scr">${T('My Garage')}</h2>
-  <p class="scrsub">${T('Saved rigs make requests take 30 seconds')}</p>
-  <div class="cols2"><div>
-  ${S.trucks.map(x=>`<div class="card">
-    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('truck')} ${esc(x.data.unit) ? T('Unit')+' '+esc(x.data.unit)+' — ' : ''}${esc(x.data.year)} ${esc(x.data.make)} ${esc(x.data.model)} ${dutyPill(x.data.duty)}</b>
-      <span style="display:inline-flex; gap:12px">
-        <span class="faint" style="cursor:pointer" onclick='S.editTruck={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup2")'>${ic('edit',13)} ${T('Edit')}</span>
-        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTruck(${x.id}, "${esc((x.data.year||"") + " " + (x.data.make||"") + " " + (x.data.model||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} ${T('Delete')}</span>
-      </span></div>
-    <div class="faint" style="margin-top:7px; line-height:1.7">${T('Engine:')} ${esc(x.data.engine)} · ${esc(x.data.trans)} · ${esc(x.data.axles)}<br>${T('Tires:')} ${esc(x.data.steer)} / ${esc(x.data.drive)} · ${esc(x.data.wheels)}</div>
-  </div>`).join('') || `<div class="card"><a onclick="S.editTruck=null; nav('d-setup2')">${T('+ Add your truck')}</a></div>`}
-  </div><div>
-  ${S.trailers.map(x=>`<div class="card">
-    <div class="row"><b class="mini k" style="display:inline-flex;align-items:center;gap:7px">${ic('trailer')} ${T('Trailer')} ${esc(x.data.num)} — ${esc(x.data.type)}</b>
-      <span style="display:inline-flex; gap:12px">
-        <span class="faint" style="cursor:pointer" onclick='S.editTrailer={id:${x.id},...${JSON.stringify(x.data)}}; nav("d-setup3")'>${ic('edit',13)} ${T('Edit')}</span>
-        <span class="faint" style="cursor:pointer; color:var(--red)" onclick='removeTrailer(${x.id}, "${esc((x.data.type||"trailer") + " " + (x.data.num||"")).trim().replace(/"/g,"")}")'>${ic('trash',13)} ${T('Delete')}</span>
-      </span></div>
-    <div class="faint" style="margin-top:7px; line-height:1.7">${esc(x.data.len)} · ${esc(x.data.axles)} · ${T('Tires:')} ${esc(x.data.tires)}<br>${x.data.hazmat ? T('Hazmat: Class')+' '+esc(x.data.hzClass)+' · UN '+esc(x.data.un) : T('No hazmat')}</div>
-  </div>`).join('') || `<div class="card"><a onclick="S.editTrailer=null; nav('d-setup3')">${T('+ Add your trailer')}</a></div>`}
-  </div></div>
-  <div class="row" style="gap:8px">
-    <button class="btn ghost" onclick="S.editTruck=null; nav('d-setup2')">${T('+ Add truck')}</button>
-    <button class="btn ghost" onclick="S.editTrailer=null; nav('d-setup3')">${T('+ Add trailer')}</button>
-  </div>`;
+  const actions='<button class="btn ghost" onclick="S.editTruck=null;nav(\'d-setup2\')">'+ic('plus',16)+' '+T('Add truck')+'</button>'+
+    '<button class="btn ghost" onclick="S.editTrailer=null;nav(\'d-setup3\')">'+ic('plus',16)+' '+T('Add trailer')+'</button>';
+  return pageHeading(T('My Garage'),T('Your equipment. Ready for every request.'),actions)+
+    '<div class="equipment-grid">'+S.trucks.map(x=>equipmentCard('truck',x)).join('')+
+    S.trailers.map(x=>equipmentCard('trailer',x)).join('')+'</div>'+
+    (!S.trucks.length&&!S.trailers.length?'<div class="card empty-state">'+ic('truck',44)+'<h3>'+T('Make your next request easier.')+
+      '</h3><p>'+T('Add your trucks and trailers once. Their details travel with your requests.')+'</p></div>':'');
 }
 
-/* ---------------- shared: message threads & chat ---------------- */
 async function vThreads(){
-  const rows = await api('GET', '/messages/threads');
-  return `
-  <h2 class="scr">${T('Messages')}</h2>
-  <p class="scrsub">${T(rows.length ? 'One thread per request & company' : 'No conversations yet')}</p>
-  ${rows.map(t=>`<div class="card click" onclick="openThread(${t.request_id},${t.provider_id},null)">
-    <div class="row"><div><b class="mini k">${esc(t.other_name || T('Conversation'))}</b>
-    <div class="faint">${T('Request #')}${t.request_id} · ${esc(T(t.service_label))}${t.last_body ? ' — '+esc(t.last_body.slice(0,60)) : ''}</div></div>
-    <span class="pill ${t.status==='open'?'red':'gray'}">${esc(T(t.status))}</span></div></div>`).join('')}`;
+  const rows=await api('GET','/messages/threads');
+  return pageHeading(T('Messages'),T('Your service conversations, all in one place.'))+
+    (rows.length?'<label class="f" for="thread-search">'+T('Search conversations')+'</label><input class="thread-search" id="thread-search" type="text" placeholder="'+
+      T('Company, service or request number')+'" oninput="filterThreads(this.value)"><div class="thread-list">'+threadRows(rows)+'</div>':
+      '<div class="card empty-state">'+ic('chat',42)+'<h3>'+T('No conversations yet')+'</h3><p>'+T('Messages with service providers will appear here when you connect.')+'</p></div>');
 }
+
 function openThread(reqId, provId, from){
   S.chatKey = { r: reqId, p: provId };
   S.chatBack = from || null;
@@ -1058,7 +1041,7 @@ async function chatView(backView){
       </div>` : ''}
       ${d.messages.map(m=>`
         <div class="msg ${m.quote ? 'quotecard' : ''} ${mine(m.sender_id) ? 'me' : 'them'}">
-          ${m.quote ? `${ic('tag',14)} <b class="k">${T('QUOTE')} — ${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? ' · '+T('ETA')+' '+esc(fmtEta(m.quote.eta)) : ''}${m.quote.note ? ' · '+esc(m.quote.note) : ''}` : esc(m.body)}
+          ${m.quote ? `<span class="quote-title">${ic('tag',14)} ${T('Service quote')}</span><b class="quote-amount">${fmt$(m.quote.amount_cents)}</b>${m.quote.eta ? '<div>'+T('Estimated arrival')+' · '+esc(fmtEta(m.quote.eta))+'</div>' : ''}${m.quote.note ? '<p>'+esc(m.quote.note)+'</p>' : ''}` : esc(m.body)}
           <span class="t">${timeAgo(m.created_at)}</span>
         </div>`).join('') || `<div class="faint" style="text-align:center; padding:20px">${T('Say hello — the other side is notified instantly')}</div>`}
     </div>
@@ -1073,10 +1056,10 @@ async function chatView(backView){
       <button class="btn dark" style="width:auto; padding:12px 14px" onclick="sendQuote()">${ic('tag',14)} Quote</button>
     </div>` : ''}
     <div class="chatin">
-      <input type="text" id="chatIn" placeholder="${T('Type a message…')}" enterkeyhint="send"
+      <input type="text" id="chatIn" aria-label="${T('Message')}" placeholder="${T('Type a message…')}" enterkeyhint="send"
         value="${esc(S.chatDraft || '')}" oninput="S.chatDraft=this.value"
         onkeydown="if(event.key==='Enter')sendChat()">
-      <button onclick="sendChat()">${ic('send',17)}</button>
+      <button aria-label="${T('Send message')}" onclick="sendChat()">${ic('send',17)}</button>
     </div>
   </div>`;
 }
@@ -1454,9 +1437,9 @@ function vPSetup5(){
 }
 async function uploadDoc(input, key){
   if (!input.files[0]) return;
-  const fd = new FormData(); fd.append('file', input.files[0]);
-  const res = await fetch('/api/upload', { method: 'POST', body: fd });
-  const data = await res.json();
+  let data;
+  try { data=await RIGRX_PLATFORM.upload(input.files[0]); }
+  catch(error){toast(error.message||T('Request failed'));return;}
   if (data.url){
     const v = { ...(S.provider?.verification || {}), [key]: data.url };
     await api('PUT', '/provider/profile', { verification: v });
@@ -1482,8 +1465,8 @@ async function vPFeed(){
   <h2 class="scr">Live Leads</h2>
   <p class="scrsub">Open requests inside your coverage that match your services</p>
   ${pendingBanner(d.approved)}
-  ${(S.provider?.lead_credits || 0) > 0 ? `<div class="card" style="border-color:#1a7f43; background:#f0faf4">
-    <div class="mini" style="color:#14603a; line-height:1.5"><b class="k" style="color:#14603a">${S.provider.lead_credits} free lead${S.provider.lead_credits===1?'':'s'} on your account</b> — unlocking a lead uses one automatically. No charge.</div>
+  ${(S.provider?.lead_credits || 0) > 0 ? `<div class="card" style="border-color:#1a7f43; background:#183a2c">
+    <div class="mini" style="color:#9ae4b8; line-height:1.5"><b class="k" style="color:#9ae4b8">${S.provider.lead_credits} free lead${S.provider.lead_credits===1?'':'s'} on your account</b> — unlocking a lead uses one automatically. No charge.</div>
   </div>` : ''}
   ${d.approved && !d.license_verified ? `<div class="card alert">
     <div class="mini" style="line-height:1.55">${ic('warn',14)} <b class="k">Your license isn't verified yet.</b>
@@ -1589,8 +1572,8 @@ async function vPLead(){
   ${l.selected_provider === S.me.id ? '<div class="card alert"><b class="mini k">The driver chose YOU for this job</b></div>' : ''}
   ` : `
   <div class="card alert"><div class="mini" style="line-height:1.55">${ic('zap',13)} First 3 buyers get this lead at the standard price. After that, one final <b class="k">premium slot</b> at 2×. Max 4 companies ever see this driver's info.</div></div>
-  ${l.my_credits > 0 ? `<div class="card" style="border-color:#1a7f43; background:#f0faf4">
-    <div class="mini" style="line-height:1.5; color:#14603a"><b class="k" style="color:#14603a">${l.my_credits} free lead${l.my_credits===1?'':'s'} on your account.</b> This unlock uses one — your card is not touched.</div>
+  ${l.my_credits > 0 ? `<div class="card" style="border-color:#1a7f43; background:#183a2c">
+    <div class="mini" style="line-height:1.5; color:#9ae4b8"><b class="k" style="color:#9ae4b8">${l.my_credits} free lead${l.my_credits===1?'':'s'} on your account.</b> This unlock uses one — your card is not touched.</div>
   </div>` : ''}
   <button class="btn big" id="buyBtn" onclick="buyLead(this)">${ic('unlock',17)} ${l.my_credits > 0 ? `UNLOCK FREE — 1 CREDIT` : `${l.premium ? 'FORCE IN' : 'UNLOCK LEAD'} — ${fmt$(l.price_cents)}`}</button>
   <div class="faint" style="text-align:center; margin-top:9px">${l.my_credits > 0 ? 'No charge — you have free leads left' : S.simulatedPayments ? 'Payment simulation mode — no real charge' : ic('card',12) + ' Charged to your card on file'} · unreachable-driver refund policy applies</div>`}
@@ -2027,7 +2010,7 @@ async function vPSettings(){
     <div class="faint" style="margin-top:7px; line-height:1.5">Turn this on if someone answering your dispatch line speaks Spanish. Spanish-speaking drivers see a "Hablamos español" badge next to your name when comparing responders — it wins jobs.</div>
   </div>
   <div class="card"><span class="sec">Billing</span>
-    ${p.lead_credits > 0 ? `<div class="mini" style="margin-top:7px; color:#14603a"><b class="k" style="color:#14603a">${p.lead_credits} free lead${p.lead_credits===1?'':'s'} remaining</b> — used automatically before your card.</div>` : ''}
+    ${p.lead_credits > 0 ? `<div class="mini" style="margin-top:7px; color:#9ae4b8"><b class="k" style="color:#9ae4b8">${p.lead_credits} free lead${p.lead_credits===1?'':'s'} remaining</b> — used automatically before your card.</div>` : ''}
     <div class="mini" style="margin-top:7px; line-height:1.7">
       ${S.simulatedPayments
         ? ic('zap',13)+' Payment simulation mode — no card needed yet'
@@ -2748,48 +2731,53 @@ const NAVS = {
 };
 let renderSeq = 0;
 async function render(){
-  const seq = ++renderSeq;
-  const root = $('root');
-  const fn = VIEWS[S.view];
-  // Chat takes over the phone screen — no tab bar, no page scroll behind it.
-  document.body.classList.toggle('chatmode', S.view === 'd-chat' || S.view === 'p-chat');
-  if (!fn){ root.innerHTML = authShell(`<div class="card">${T('Page not found.')} <a onclick="nav(homeFor())">${T('Go home')}</a></div>`); return; }
+  const seq=++renderSeq, root=$('root');
+  const fn=S.view==='more'?vMore:VIEWS[S.view];
+  document.body.classList.toggle('chatmode',S.view==='d-chat'||S.view==='p-chat');
+  if(!fn){root.innerHTML=authShell('<div class="card">'+T('Page not found.')+'</div>');return;}
   let html;
-  try { html = await fn(); }
-  catch(e){ console.error(e); html = `<div class="card alert" style="margin-top:20px"><div class="mini">Couldn't load this page — check your connection and try again.</div></div>`; }
-  if (seq !== renderSeq) return; // a newer navigation happened while loading
-  if (AUTH_LAYOUT.has(S.view) || !S.me){ root.innerHTML = AUTH_LAYOUT.has(S.view) ? html : authShell(html); return; }
-  const navKey = S.me.role === 'provider' && (S.me.member_role === 'tech') ? 'tech' : S.me.role;
-  const items = (NAVS[navKey] || NAVS.driver)
-    .filter(t => !(t.v === 'p-settings' && S.me.member_role === 'dispatcher'))
-    .map(t => ({ ...t, act: t.v === S.view || (t.also || []).includes(S.view) }));
-  const who = S.me.role === 'provider'
-    ? `${esc(S.provider?.name || S.me.name || 'My company')}<br><span class="faint">${
-        S.me.member_role === 'tech' ? esc(S.me.name || 'Technician') + ' · technician'
-        : S.me.member_role === 'dispatcher' ? esc(S.me.name || '') + ' · dispatcher'
-        : (S.provider?.approved ? 'Verified provider' : 'Pending approval')}</span>`
-    : `${esc(S.me.name || S.me.phone)}<br><span class="faint">${S.me.role === 'admin' ? 'RIGRX admin' : T('Driver') + ' · ' + esc(S.me.phone)}</span>`;
-  root.innerHTML = `
-  <div class="shell">
-    <div class="sidebar">
-      <div class="slogo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
-      ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,19)} ${T(t.label)}</button>`).join('')}
-      <div class="spacer"></div>
-      ${S.me.role === 'driver' ? `<button onclick="toggleLang()">${ic('chat',18)} ${getLang() === 'es' ? 'View in English' : 'Ver en español'}</button>` : ''}
-      <button onclick="signOut()">${ic('out',18)} ${T('Sign out')}</button>
-      <div class="whoami">${who}</div>
-    </div>
-    <div class="main">
-      <div class="topbar">
-        <div class="logo click" onclick="nav(homeFor())" title="Back to home">RIG<span>RX</span></div>
-        <div class="sub">${S.me.role==='provider' ? esc(S.provider?.name || '') : esc((S.me.name || '').split(' ')[0])}${S.me.role === 'driver' ? ` &nbsp;·&nbsp; <a onclick="toggleLang()">${getLang() === 'es' ? 'EN' : 'ES'}</a>` : ''} &nbsp;·&nbsp; <a onclick="signOut()">${T('Sign out')}</a></div>
-      </div>
-      <div class="content${S.me.role==='driver' ? '' : ' wide'}">${html}</div>
-    </div>
-  </div>
-  <div class="tabbar">
-    ${items.map(t=>`<button class="${t.act?'active':''}" onclick="nav('${t.v}')">${ic(t.ico,21)}${T(t.label)}</button>`).join('')}
-  </div>`;
+  try{html=await fn();}
+  catch(e){console.error(e);html='<div class="card alert"><h2 class="scr">'+T('Couldn’t load this page.')+
+    '</h2><p class="scrsub">'+T('Check your connection and try again.')+'</p><button class="btn" onclick="render()">'+T('Try again')+'</button></div>';}
+  if(seq!==renderSeq)return;
+  if(AUTH_LAYOUT.has(S.view)||!S.me){
+    root.innerHTML=AUTH_LAYOUT.has(S.view)?html:authShell(html);
+    enhanceUI();updateConnectionNotice();return;
+  }
+  const items=currentNavItems().map(t=>({...t,act:t.v===S.view||(t.also||[]).includes(S.view)}));
+  const mobileItems=items.length>5?items.slice(0,4):items;
+  const extraActive=items.slice(4).some(t=>t.act)||S.view==='more';
+  const role=S.me.role==='provider'?(S.me.member_role||'owner'):S.me.role;
+  const who=S.me.role==='provider'?esc(S.provider?.name||S.me.name||T('My company')):esc(S.me.name||T('Driver'));
+  const roleLabel=role==='admin'?'Administration':role==='owner'?'Service company':role==='dispatcher'?'Dispatcher':role==='tech'?'Technician':'Driver';
+  const steps={'d-request':1,'d-details':2,'d-location':3,'d-review':4};
+  if(steps[S.view])html=requestSteps(steps[S.view])+html;
+  if(S.view==='d-chat'||S.view==='p-chat'){
+    html='<div class="chat-workspace"><aside class="chat-rail"><div class="eyebrow">'+T('MESSAGES / SERVICE')+
+      '</div><h3>'+T('Your conversation')+'</h3><p>'+T('Keep the details, quote and next steps together.')+
+      '</p><button class="btn ghost" onclick="leaveChat(\''+(S.me.role==='provider'?'p-threads':'d-threads')+'\')">'+ic('chat',18)+' '+T('All messages')+
+      '</button><div class="divider"></div><p>'+T('Confirm the scope, price and estimated arrival with your provider before choosing.')+'</p></aside>'+html+'</div>';
+  }
+  const navButtons=list=>list.map(t=>'<button class="'+(t.act?'active':'')+'"'+(t.act?' aria-current="page"':'')+
+    ' onclick="nav(\''+t.v+'\')">'+ic(t.ico,20)+'<span>'+T(t.label)+'</span></button>').join('');
+  root.innerHTML='<div class="shell"><nav class="sidebar" aria-label="'+T('Main navigation')+'">'+
+    '<button class="slogo" onclick="nav(homeFor())" aria-label="'+T('Home')+'">'+brandMark()+'</button>'+
+    '<div class="eyebrow" style="padding:0 12px 12px">'+T(roleLabel)+'</div>'+navButtons(items)+
+    '<div class="spacer"></div><button onclick="toggleLang()">'+ic('chat',18)+' '+(getLang()==='es'?'English':'Español')+'</button>'+
+    '<button onclick="signOut()">'+ic('out',18)+' '+T('Sign out')+'</button><div class="whoami">'+who+
+    '<br><span class="faint">'+T(roleLabel)+'</span></div></nav>'+
+    '<div class="main"><header class="topbar"><button class="logo icon-button" style="width:auto;border:0;background:none" onclick="nav(homeFor())" aria-label="'+T('Home')+'">'+brandMark()+
+    '</button><div class="sub">'+who+'<br><a role="button" tabindex="0" onclick="toggleLang()">'+(getLang()==='es'?'EN':'ES')+
+    '</a> · <a role="button" tabindex="0" onclick="signOut()">'+T('Sign out')+'</a></div></header>'+
+    '<main id="main-content" tabindex="-1" class="content'+(S.me.role==='driver'?'':' wide')+'" data-view="'+esc(S.view)+'">'+html+'</main></div></div>'+
+    '<nav class="tabbar" aria-label="'+T('Main navigation')+'">'+navButtons(mobileItems)+
+    (items.length>5?'<button class="'+(extraActive?'active':'')+'" onclick="nav(\'more\')">'+ic('sliders',21)+'<span>'+T('More')+'</span></button>':'')+'</nav>';
+  enhanceUI();updateConnectionNotice();
+  if(S.focusHeading&&!document.body.classList.contains('chatmode')){
+    S.focusHeading=false;
+    const heading=root.querySelector('main h2');
+    if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
+  }
 }
 
 /* ---------------- boot ---------------- */
