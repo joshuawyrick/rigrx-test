@@ -8,7 +8,7 @@ module.exports=async function check(base,accounts){
     const context=await browser.newContext({viewport:{width,height:900}});
     await context.addCookies([{name:'rigrx_session',value:account.cookie.split('=')[1],url:base}]);
     const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
-    await page.goto(base);await page.waitForSelector('.sidebar');
+    await page.goto(base);await page.waitForSelector('.sidebar',{state:'attached'});
     await page.evaluate(async view=>{nav(view);await render();},view);
     const content=await page.locator('#root').innerText();assert.ok(!content.includes('Couldn’t load this page.'),name+' failed');
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+2),false,name+' overflow at '+width);

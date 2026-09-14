@@ -431,3 +431,6 @@ CREATE TABLE IF NOT EXISTS notification_queue (
  status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),last_error TEXT
 );
+
+ALTER TABLE payment_orders ADD COLUMN IF NOT EXISTS customer_id TEXT;
+ALTER TABLE payment_orders ADD COLUMN IF NOT EXISTS method_id TEXT;

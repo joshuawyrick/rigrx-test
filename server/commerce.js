@@ -33,7 +33,8 @@ async function buy(requestId,providerId){
   const pending=await tx.one('SELECT * FROM payment_orders WHERE request_id=$1 AND provider_id=$2',[requestId,providerId]);
   if(pending?.status==='pending'){
    if(Date.now()-new Date(pending.created_at)>23*3600000)throw fail(409,'Payment awaiting reconciliation. Contact RIGRX; do not pay again.');
-   return {order:pending,provider:p};
+   if(!payments.SIMULATED() && (!pending.customer_id||!pending.method_id))throw fail(409,'This older payment needs administrator reconciliation');
+   return {order:pending,provider:{...p,stripe_customer:pending.customer_id,stripe_pm:pending.method_id}};
   }
   if(r.status!=='open')throw fail(409,'Lead is no longer open');
   if(!await eligible(p,r,tx))throw fail(403,'This lead does not match your approved services or coverage');
@@ -49,8 +50,9 @@ async function buy(requestId,providerId){
     VALUES($1,$2,$3,0,$4,'credit','credit',$5) RETURNING *`,[requestId,providerId,slot,premium,amount]);
    return {purchase};
   }
+  if(!payments.SIMULATED() && (!p.stripe_customer||!p.stripe_pm))throw fail(402,'Add a card in company Settings before purchasing');
   if(pending)await tx.q('DELETE FROM payment_orders WHERE id=$1 AND status=$2',[pending.id,'failed']);
-  const order=await tx.one('INSERT INTO payment_orders(id,request_id,provider_id,slot,premium,amount_cents) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',[crypto.randomUUID(),requestId,providerId,slot,premium,amount]);
+  const order=await tx.one('INSERT INTO payment_orders(id,request_id,provider_id,slot,premium,amount_cents,customer_id,method_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[crypto.randomUUID(),requestId,providerId,slot,premium,amount,p.stripe_customer,p.stripe_pm]);
   return {order,provider:p};
  });
  if(reserved.purchase)return reserved.purchase;
