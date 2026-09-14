@@ -4,7 +4,8 @@ const payments=require('./payments');
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 async function eligible(provider,request,tx={q,one}){
  if(!provider?.approved)return false;
- const matches=await require('./match').matchProviders(request,50);
+ let matches=await require('./match').matchProviders(request);
+ if(!matches.length)matches=await require('./match').matchProviders(request,50);
  return matches.some(m=>m.user_id===provider.user_id);
 }
 async function finalize(orderId,paymentId){

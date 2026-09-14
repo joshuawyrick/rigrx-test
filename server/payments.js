@@ -1,11 +1,7 @@
 // ============ Payments (Stripe) ============
 // Without STRIPE_SECRET_KEY, purchases run in SIMULATION MODE: they succeed instantly
 // and are marked 'simulated' — the full app flow works before you connect Stripe.
-let stripe = null;
-if (require('./config').paymentMode === 'stripe') {
-  try { stripe = require('stripe')(process.env.STRIPE_SECRET_KEY); }
-  catch (e) { console.error('Stripe init failed, running in simulation mode:', e.message); }
-}
+const stripe=require('./config').paymentMode==='stripe'?require('stripe')(process.env.STRIPE_SECRET_KEY,{timeout:20000,maxNetworkRetries:1}):null;
 
 const SIMULATED = () => !stripe;
 

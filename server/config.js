@@ -14,6 +14,7 @@ function validate(){
  if(paymentMode==='stripe')for(const k of ['STRIPE_SECRET_KEY','STRIPE_PUBLISHABLE_KEY','STRIPE_WEBHOOK_SECRET'])if(!process.env[k])missing.push(k);
  if(storageMode==='s3')for(const k of ['S3_BUCKET','S3_REGION','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY'])if(!process.env[k])missing.push(k);
  if(live){
+  if(!/^sk_live_/.test(process.env.STRIPE_SECRET_KEY||'')||!/^pk_live_/.test(process.env.STRIPE_PUBLISHABLE_KEY||''))missing.push('Stripe live keys (use RIGRX_MODE=test with test keys)');
   if(smsMode!=='twilio'||paymentMode!=='stripe')missing.push('real SMS and payment modes');
   if(!/^https:\/\//.test(process.env.BASE_URL||''))missing.push('HTTPS BASE_URL');
   if(!process.env.OTP_SECRET||process.env.OTP_SECRET.length<32)missing.push('OTP_SECRET (32+ characters)');
