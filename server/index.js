@@ -1,0 +1,96 @@
+// ============ RIGRX server ============
+require('dotenv').config();
+const http = require('http');
+const path = require('path');
+const express = require('express');
+const cookieParser = require('cookie-parser');
+const { WebSocketServer } = require('ws');
+const { migrate, one } = require('./db');
+const { attachUser } = require('./auth');
+const { wsRegister } = require('./notify');
+const routes = require('./routes');
+
+const app = express();
+app.use(express.json({ limit: '2mb' }));
+app.use(cookieParser());
+app.use(attachUser);
+
+app.use('/api', routes);
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+// index:false so the cache-busting handler below always renders index.html itself
+app.use(express.static(path.join(__dirname, '..', 'public'), { index: false }));
+
+// ---- cache-busting ----
+// index.html is never cached, and it stamps the current build number onto app.js /
+// styles.css. When you deploy an update, browsers fetch the new files automatically
+// instead of running stale code until someone thinks to hard-refresh.
+const fs = require('fs');
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+function buildStamp() {
+  let newest = 0;
+  for (const f of ['app.js', 'icons.js', 'guard.js', 'i18n.js', 'styles.css', 'index.html']) {
+    try { newest = Math.max(newest, fs.statSync(path.join(PUBLIC_DIR, f)).mtimeMs); } catch (e) {}
+  }
+  return String(Math.round(newest));
+}
+let BUILD = buildStamp();
+function sendIndex(req, res) {
+  fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
+    if (err) return res.status(500).send('Could not load the app');
+    res.set('Cache-Control', 'no-store');
+    res.type('html').send(html.replace(/__BUILD__/g, BUILD));
+  });
+}
+// Public recruiting page for service companies. A real static page rather than an
+// app route, so it loads instantly and search engines can read it.
+app.get(['/for-service-companies', '/service-companies', '/providers'], (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  res.sendFile(path.join(PUBLIC_DIR, 'for-service-companies.html'));
+});
+
+app.get('*', sendIndex);
+
+// central error handler. Errors that carry a status (like the sign-in rate
+// limits) speak for themselves; anything else stays a generic 500.
+app.use((err, req, res, next) => {
+  if (err && err.status && err.status < 500) return res.status(err.status).json({ error: err.message });
+  console.error(err);
+  res.status(500).json({ error: 'Something went wrong on our end' });
+});
+
+// Last line of defence: log and keep serving rather than exiting the process.
+process.on('unhandledRejection', e => console.error('Unhandled promise rejection:', e));
+process.on('uncaughtException', e => console.error('Uncaught exception:', e));
+
+const server = http.createServer(app);
+
+// ---- WebSocket: authenticated by session cookie ----
+const wss = new WebSocketServer({ server, path: '/ws' });
+wss.on('connection', async (socket, req) => {
+  try {
+    const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')));
+    const token = cookies.rigrx_session;
+    if (!token) return socket.close();
+    const user = await one(
+      `SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=$1 AND s.expires_at > NOW()`, [token]);
+    if (!user) return socket.close();
+    wsRegister(user.id, socket);
+    socket.send(JSON.stringify({ event: 'hello', data: { user_id: user.id } }));
+  } catch (e) { socket.close(); }
+});
+
+// Every minute: hand back unaccepted jobs, page the admin about silent requests,
+// nudge stalled winners, and expire stale requests.
+setInterval(() => {
+  routes.sweepUnacceptedJobs?.().catch(e => console.error('job sweep failed:', e.message));
+  routes.sweepMarketplace?.().catch(e => console.error('marketplace sweep failed:', e.message));
+}, 60 * 1000).unref();
+
+const PORT = process.env.PORT || 3000;
+const { seedIfEmpty, seedTradesIfEmpty } = require('./catalog');
+migrate().then(seedIfEmpty).then(seedTradesIfEmpty).then(() => {
+  server.listen(PORT, () => console.log(`RIGRX running on http://localhost:${PORT}`));
+}).catch(e => {
+  console.error('Database migration failed. Is DATABASE_URL set correctly?', e);
+  process.exit(1);
+});
