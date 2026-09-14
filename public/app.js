@@ -97,11 +97,7 @@ function homeFor(){
 }
 
 /* ---------------- live updates (WebSocket) ---------------- */
-let ws = null;
-function connectWS(){
-  if (ws) try { ws.close(); } catch(e){}
-  ws = RIGRX_PLATFORM.connect();
-  ws.onmessage = ev => {
+const liveConnection = RIGRX_PLATFORM.liveConnection(ev => {
     let msg; try { msg = JSON.parse(ev.data); } catch(e){ return; }
     const { event, data } = msg;
     if (event === 'new_lead'){
@@ -120,9 +116,19 @@ function connectWS(){
       toast(data.won ? 'You got the job!' : 'Driver went with another provider');
       if (S.view.startsWith('p-')) render();
     }
-  };
-  ws.onclose = () => setTimeout(()=>{ if (S.me) connectWS(); }, 4000);
+});
+function connectWS(){ if(S.me)liveConnection.start(); }
+window.addEventListener('online',connectWS);
+function openEntry(){
+  const route=RIGRX_PLATFORM.leadLink(location.hash,S.me);
+  if(route && S.provider?.name){
+    history.replaceState(history.state,'',location.pathname+location.search);
+    nav(route.view,{leadId:route.leadId});
+  }else nav(homeFor());
 }
+window.addEventListener('hashchange',()=>{
+  if(RIGRX_PLATFORM.leadLink(location.hash,S.me))openEntry();
+});
 
 /* ---------------- auth views ---------------- */
 function authShell(inner, wide){
@@ -192,13 +198,13 @@ async function verifyCode(){
   S.verifyingCode=true;
   try {
     await api('POST', '/auth/verify', { phone: S.pendingPhone, code, role: S.pendingRole, lang: getLang() });
-    await loadMe(); connectWS(); nav(homeFor());
+    await loadMe(); connectWS(); openEntry();
   } finally {S.verifyingCode=false;}
 }
 async function signOut(){
   await api('POST', '/auth/logout').catch(()=>{});
   S.me = null; S.provider = null;
-  if (ws) try { ws.close(); } catch(e){}
+  liveConnection.stop();
   nav('signin');
 }
 
@@ -2785,7 +2791,7 @@ async function render(){
   await loadCatalog();
   try { await loadMe(); } catch(e){}
   if (S.me) connectWS();
-  nav(homeFor());
+  openEntry();
 })();
 
 async function toggleSpanishDispatch(on){

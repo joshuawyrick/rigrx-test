@@ -27,13 +27,17 @@ const sockets = new Map();
 function wsRegister(userId, socket) {
   if (!sockets.has(userId)) sockets.set(userId, new Set());
   sockets.get(userId).add(socket);
-  socket.on('close', () => sockets.get(userId)?.delete(socket));
+  socket.on('close', () => {
+    const set = sockets.get(userId);
+    set?.delete(socket);
+    if (set?.size === 0) sockets.delete(userId);
+  });
 }
 function wsPush(userId, event, data) {
   const set = sockets.get(userId);
   if (!set) return;
   const payload = JSON.stringify({ event, data });
-  for (const s of set) { try { s.send(payload); } catch (e) {} }
+  for (const s of set) { if (s.readyState === 1) { try { s.send(payload); } catch (e) {} } }
 }
 
 module.exports = { sms, wsRegister, wsPush };

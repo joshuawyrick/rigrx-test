@@ -38,3 +38,26 @@ test('Web worker does not cache private app responses',()=>{
  assert.doesNotMatch(sw,/\.put\(/);
  assert.match(sw,/pathname\.startsWith\('\/api\/'\)/);
 });
+test('SMS lead links allow only valid provider destinations',()=>{
+ const p=client();const owner={role:'provider'};
+ assert.equal(p.leadLink('#lead-12',owner).leadId,12);
+ for(const hash of ['#lead-0','#lead--1','#lead-12/other','#lead-9007199254740992','#main-content'])assert.equal(p.leadLink(hash,owner),null);
+ for(const user of [null,{role:'driver'},{role:'admin'},{role:'provider',member_role:'tech'}])assert.equal(p.leadLink('#lead-12',user),null);
+});
+test('Live updates use one connection and one retry; logout cancels stale callbacks',()=>{
+ const sockets=[],timers=new Map();let id=0,delivered=0;
+ const sandbox={location:{protocol:'https:',host:'test.example'},WebSocket:class{
+  constructor(){sockets.push(this);} close(){this.onclose?.();}
+ }};
+ vm.createContext(sandbox);vm.runInContext(source,sandbox);
+ const clock={setTimeout(fn){timers.set(++id,fn);return id;},clearTimeout(id){timers.delete(id);}};
+ const live=sandbox.RIGRX_PLATFORM.liveConnection(()=>delivered++,clock);
+ live.start();live.start();assert.equal(sockets.length,1);
+ sockets[0].onclose();sockets[0].onclose();assert.equal(timers.size,1);
+ const retry=[...timers.values()][0];timers.clear();retry();assert.equal(sockets.length,2);
+ sockets[0].onclose();assert.equal(timers.size,0);
+ sockets[0].onmessage({});sockets[1].onmessage({});assert.equal(delivered,1);
+ live.stop();assert.equal(timers.size,0);sockets[1].onclose();assert.equal(timers.size,0);
+ live.start();sockets[2].onclose();assert.equal(timers.size,1);
+ const stale=[...timers.values()][0];live.stop();stale();assert.equal(sockets.length,3);
+});

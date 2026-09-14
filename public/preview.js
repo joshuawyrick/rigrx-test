@@ -25,6 +25,8 @@ function previewMe(){
 }
 const previewLead={...previewRequest,truck_class:'2022 Peterbilt 389',trailer_type:'Crude tanker',hazmat:true,can_move:'no',band:'10–25 miles',slots:{total:1,standard:1,standardLeft:2},price_cents:3500,spec:[{k:'Engine',v:'Cummins X15'},{k:'Transmission',v:'18-speed manual'}]};
 window.RIGRX_PLATFORM=Object.freeze({
+  leadLink:window.RIGRX_PLATFORM.leadLink,
+  liveConnection(){return {start(){},stop(){}};},
   async request(method,path,body){
     if(path==='/auth/request-code')return {devCode:'123456'};
     if(path==='/auth/verify'){previewRole=body.role==='provider'?'provider':'driver';return {};}

@@ -499,13 +499,15 @@ router.get('/requests/:id', auth.requireAuth, async (req, res) => {
 });
 
 router.post('/requests/:id/select', auth.requireAuth, async (req, res) => {
-  const r = await one(`UPDATE requests SET status='selected', selected_provider=$1, selected_at=NOW()
-    WHERE id=$2 AND driver_id=$3 AND status='open' RETURNING *`,
-    [req.body.provider_id, req.params.id, req.user.id]);
-  if (!r) return res.status(400).json({ error: 'Request not open' });
+  const providerId = Number(req.body.provider_id);
+  if (!Number.isSafeInteger(providerId) || providerId < 1)
+    return res.status(400).json({ error: 'Choose a responding company' });
+  const r = await one(require('./selection').SELECT_PROVIDER,
+    [providerId, req.params.id, req.user.id]);
+  if (!r) return res.status(409).json({ error: 'Request is no longer open or this company is no longer eligible. Refresh the responses.' });
   const buyers = await q(`SELECT pu.provider_id, u.phone FROM purchases pu JOIN users u ON u.id=pu.provider_id WHERE pu.request_id=$1`, [r.id]);
   for (const b of buyers) {
-    if (b.provider_id === req.body.provider_id) {
+    if (b.provider_id === providerId) {
       await sms(b.provider_id, b.phone, `RIGRX: You got the job! Request #${r.id} (${r.service_label}). The driver chose you.`);
       wsPush(b.provider_id, 'selected', { request_id: r.id, won: true });
     } else {
