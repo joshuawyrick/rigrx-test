@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+uploads/
+test-results/
+playwright-report/
+dist/
+.DS_Store
+
+.demo-data/
+.release-test-data/
+release/
